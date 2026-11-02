@@ -1,0 +1,13 @@
+# FastFill workflow (Python 3.11)
+numpy==1.26.4
+scipy==1.11.4
+shapely==2.1.1
+torch==2.7.0
+# step 1 (FastFill sizes) only
+transformers==4.57.6
+peft==0.17.0
+safetensors==0.5.3
+tokenizers==0.22.2
+huggingface_hub
+# tests
+pytest
