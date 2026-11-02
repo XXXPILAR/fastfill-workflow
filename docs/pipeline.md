@@ -15,8 +15,8 @@ How to install and run it, the input and output formats and the coordinate conve
    search that keeps sizes fixed (`loop.Loop`, `local_repair.py`):
    - hard violations: collision, out of bounds, missing support, blocked door, a broken hard input constraint, and,
      with `--robot-width`, the robot checks below;
-   - `--relocate` lets the search move an object anywhere in the room; `--resize` lets a second pass shrink an object
-     by up to 20 % when legality violations remain (never a required object);
+   - `--relocate` lets the search move an object anywhere in the room;
+   - no step resizes an object: every object, required or expansion, keeps FastFill's size;
    - soft costs are not chased, so whatever is already legal stays as the LLM placed it.
 5. **Review**: the LLM reviews the whole room once (`semantic.SemanticPass`) and only severe issues are fixed. A fix is
    kept only if the program repairs it, it adds no hard violation and leaves reach, access and doors no worse, and a
@@ -43,7 +43,7 @@ Steps added by the task mode (`run_simple(required=..., articulation=...)`, `run
 | Step | What it does |
 |---|---|
 | 3 place | the placement request marks required objects (`"required": true`, `drafting.REQUIRED_RULE`) |
-| 4 check | the robot checks cover every object plus the task's (`task_robot`); the repair takes the required objects' violations first and never shrinks them |
+| 4 check | the robot checks cover every object plus the task's (`task_robot`); the repair takes the required objects' violations first (no object is ever resized) |
 | 4b give way | an expansion object in a required object's violation is moved anywhere in the room, else removed with what stands on it; when several block together, the nearest are tried (at most `NEAR_BLOCKER_TRIES`), a removal kept only if it helps |
 | 4c required first | if a required object still has a violation: the required objects alone are repaired (or searched for from scratch), then the expansion objects come back one at a time, each kept only where the required objects stay as good (objects standing on required furniture move with it) |
 | 7 fallback | if a required object is still not legal and reachable, or the workflow fails on an error: only the required objects, laid out by the program without the LLM (`required_only`), legality and reach before the constraints; returned when it leaves the required objects better off, with `status` `fallback_required_only` and the constraints it could not meet (`unmet_constraints`) |

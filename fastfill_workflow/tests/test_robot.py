@@ -246,14 +246,13 @@ class DraftTests(unittest.TestCase):
 
 
 class FallbackTests(unittest.TestCase):
-    def test_the_size_fallback_goes_to_80_percent_without_the_catalog_floor(self):
+    def test_no_object_is_ever_shrunk(self):
         from workflow.catalog import SizeCatalog
         from workflow.local_repair import RESIZE_LEVELS, FixedSizes
         request = {"id": "bed", "category": "king size bed"}
         sizes = {"bed": [2.2, 2.0, 1.0]}
-        fallback = FixedSizes(sizes, SizeCatalog(None), levels=RESIZE_LEVELS, floor=False)
-        self.assertEqual(fallback.shrunk(request, 4)[0][0], [1.76, 1.6, .8])
-        self.assertEqual(FixedSizes(sizes, SizeCatalog(None)).shrunk(request, 4), [])  # step ④ of v4: levels 1-2
+        fixed = FixedSizes(sizes, SizeCatalog(None), levels=RESIZE_LEVELS, floor=False)
+        self.assertEqual([fixed.shrunk(request, level) for level in RESIZE_LEVELS], [[]] * len(RESIZE_LEVELS))
 
     def test_with_a_robot_an_object_on_a_large_table_gets_spots_along_its_edges(self):
         from workflow.catalog import SizeCatalog

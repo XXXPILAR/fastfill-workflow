@@ -4,7 +4,8 @@
 
 - **合法**：不碰撞、不出界、不挡门，约束满足；
 - **机器人可用**：门与门之间连通，任务要用的家具机器人走得到，要打开的柜门能打开，台面上的物品在手臂范围内；
-- **必须家具一定达标**：必须家具不删除、不缩小，最后必须合法且可达；其余的扩充家具也尽量合法、可达，只有在全屋重新找位置也不行时，才会为了给必须家具让路而删除。
+- **尺寸不改**：所有物体（必须家具和扩充家具）都保持 FastFill 预测的尺寸，流程里没有任何一步会缩放物体。
+- **必须家具一定达标**：必须家具不删除，最后必须合法且可达；其余的扩充家具也尽量合法、可达，只有在全屋重新找位置也不行时，才会为了给必须家具让路而删除。
 
 无论如何都会交出一个房间：如果必须家具仍有问题，或者流程中途出错，就交出**只放必须家具**的房间（兜底）。
 
@@ -109,7 +110,7 @@ echo '[0, 1]' > my_rooms.json        # 要跑的行号，从 0 开始
 WORKFLOW_REASONING_EFFORT=medium WORKFLOW_LLM_ATTEMPTS=0 ../.venv/bin/python scripts/run_draft.py \
     --rows examples/task_rooms.jsonl --indices 0 1 --task-roles --sizes-file my_sizes/predictions_spread.jsonl \
     --api relay --base-url https://api.kbsfdxc.net/codex/v1 --model gpt-6.1-sol --rpm 30 --rpm-file my_out/.rpm_state.json \
-    --robot-width 0.5 --drafts 2 --resize --robot-margin 0.1 --hard-zones --relocate --repair-rounds 3 --repair-seconds 180 \
+    --robot-width 0.5 --drafts 2 --robot-margin 0.1 --hard-zones --relocate --repair-rounds 3 --repair-seconds 180 \
     --workers 4 --budget-usd 20 --out my_out
 ```
 

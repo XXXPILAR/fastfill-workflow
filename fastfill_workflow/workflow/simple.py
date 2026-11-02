@@ -10,11 +10,11 @@
              it is left as the LLM made it
   ④b give way with the task's required objects (``required``). Every object, the expansion too, is checked and
              repaired alike in step ④ (legal, and for a robot reachable and free to open), the required objects'
-             violations first (the search moves, relocates blockers, and shrinks expansion objects by up to 20 %).
+             violations first (the search moves and relocates blockers; no object is ever resized).
              An expansion object is removed only to give way to a required one, and only when nothing else works:
              (1) for each hard violation step ④ leaves on a required object (a collision with it, its reach or
              doors blocked, the room's doors cut off), the expansion object in the most (and largest) of them
-             (``give_way_choice``) is searched for anywhere in the room (with what stands on it; it may shrink) and
+             (``give_way_choice``) is searched for anywhere in the room (with what stands on it) and
              moved when the critic prefers that and it is then in no hard violation; only if that fails is it
              removed, with what stands on it; (2) if something was removed and hard violations are left, one more
              repair pass on the smaller room; (3) the expansion objects' own violations are tried the same way, by
@@ -279,7 +279,7 @@ def run_simple(condition: dict, sizes: dict[str, list[float]] | None, *, plan: P
                plan_llm: bool = True, repair: bool = True, semantic: bool = True, semantic_fixes: int = 3,
                soft_tolerance: float = SOFT_TOLERANCE, templates_path: str | None = None, beam_width: int = 24,
                candidate_limit: int = 48, semantic_ask=None, robot: Robot | None = None, drafts: int = 1,
-               resize: bool = False, robot_margin: float = 0.0, hard_zones: bool = False, relocate: bool = False,
+               robot_margin: float = 0.0, hard_zones: bool = False, relocate: bool = False,
                repair_rounds: int = 1, repair_seconds: float | None = None, draft_sizes: bool = False,
                required: set[str] | None = None, articulation: set[str] | None = None) -> dict:
     """{status, layout, diagnostics, timing_s}. ``plan``: one made already (the pipeline's), else made here.
@@ -288,15 +288,14 @@ def run_simple(condition: dict, sizes: dict[str, list[float]] | None, *, plan: P
     are hard violations in step ④ and the review's gate, and the final layout is reported for it. The placement
     request asks for what the robot needs (``drafting.ROBOT_RULE``), and the repair search ranks its candidates with
     the checks' zones (``robot.RobotZones``). ``drafts``: placement calls made in parallel; the one with the fewest
-    hard violations of any kind is repaired (``draft_rank``), and every draft is recorded; each call is paid. ``resize``: when step ④
-    leaves legality violations, a second pass may shrink objects by up to 20 % (``Loop(resize=True)``); what was
-    resized is reported (``diagnostics.resized``). ``robot_margin``: the placement request, the critic and the
+    hard violations of any kind is repaired (``draft_rank``), and every draft is recorded; each call is paid. Every
+    object keeps its given size (FastFill's): no step resizes an object, required or expansion. ``robot_margin``: the placement request, the critic and the
     search use a robot this much wider, so the layout keeps a margin (grid planners keep a clearance; HSM a 1 x 1 m
     door zone); the result is reported for ``robot`` itself. ``hard_zones``: the draft fixes each carrying
     furniture's approach side and the search filters on the robot zones (``RobotZones.reserve``, ``hard``).
     ``relocate`` / ``repair_rounds``: step ④ may move a robot check's blocker anywhere in the room and takes further
-    passes while they help (``Loop``). ``repair_seconds``: the program search's time limit for step ④ (the resize
-    pass gets a third of it more); None: no limit. ``draft_sizes`` (the workflow without FastFill; ``sizes`` must be
+    passes while they help (``Loop``). ``repair_seconds``: the program search's time limit for step ④; None: no
+    limit. ``draft_sizes`` (the workflow without FastFill; ``sizes`` must be
     None): the placement call gives every object's size with its pose (``drafting.FREE_SIZE_INSTRUCTIONS``), and
     the chosen draft's sizes are the fixed sizes of every later step; an object it gives no size keeps the catalog's
     (``size_source``: {"draft": n, "catalog": n}).
@@ -348,7 +347,7 @@ def run_simple(condition: dict, sizes: dict[str, list[float]] | None, *, plan: P
         return geometry, critic
     geometry, critic = room(condition, plan)
     locked = _required_parents(condition)
-    keep_sizes = frozenset(required or ())
+    required_ids = frozenset(required or ())
 
     # ③ the placement call(s): with ``drafts`` > 1, that many in parallel, and the one with the fewest violations is kept
     if llm and drafts > 1:
@@ -385,19 +384,9 @@ def run_simple(condition: dict, sizes: dict[str, list[float]] | None, *, plan: P
         loop = Loop(geometry, plan, fixed_sizes, catalog, critic, locked_parents=locked,
                     budget=LoopBudget(gpt_repairs=0, min_soft_cost=math.inf, search_seconds=repair_seconds),
                     beam_width=beam_width, candidate_limit=candidate_limit, relocate=relocate, rounds=repair_rounds,
-                    first=keep_sizes)
+                    first=required_ids)
         placed, check = loop.run(placed)
         check["result"] = "repaired"
-        if resize and critic.assess(placed).legality:
-            # the size fallback: what full sizes could not fix, the search retries with objects up to 20 % smaller
-            # (never a required object)
-            loop = Loop(geometry, plan, fixed_sizes, catalog, critic, locked_parents=locked,
-                        budget=LoopBudget(gpt_repairs=0, min_soft_cost=math.inf,
-                                          search_seconds=repair_seconds / 3 if repair_seconds else None),
-                        beam_width=beam_width, candidate_limit=candidate_limit, resize=True, relocate=relocate,
-                        rounds=repair_rounds, keep_sizes=keep_sizes, first=keep_sizes)
-            placed, check["resize"] = loop.run(placed)
-            check["result"] = "repaired with resizing"
         return placed, check
 
     if repair and assessed["draft"].hard:
@@ -423,7 +412,7 @@ def run_simple(condition: dict, sizes: dict[str, list[float]] | None, *, plan: P
             scope = {pick} | (descendants(plan, pick) & set(placed))
             loop = Loop(geometry, plan, fixed_sizes, catalog, critic, locked_parents=locked,
                         budget=LoopBudget(gpt_repairs=0, min_soft_cost=math.inf), beam_width=beam_width,
-                        candidate_limit=candidate_limit, resize=resize, keep_sizes=keep_sizes)
+                        candidate_limit=candidate_limit)
             candidate, after = loop._pick(loop.program(scope, target, placed, RELOCATE_DRAFT_WEIGHT), critic)
             if after is None or any(pick in v.ids for v in after.hard):
                 return None
@@ -531,7 +520,7 @@ def run_simple(condition: dict, sizes: dict[str, list[float]] | None, *, plan: P
             loop = Loop(r_geometry, r_plan, fixed_sizes, catalog, r_critic, locked_parents=r_locked,
                         budget=LoopBudget(gpt_repairs=0, min_soft_cost=math.inf, search_seconds=repair_seconds),
                         beam_width=beam_width, candidate_limit=candidate_limit, relocate=True,
-                        rounds=max(repair_rounds, 3), first=keep_sizes)
+                        rounds=max(repair_rounds, 3), first=required_ids)
             alone, _info = loop.run(alone)
             how, trace_n = "repair", {"alone_after_repair": required_issues(r_critic, alone)}
             if required_issues(r_critic, alone):
@@ -545,7 +534,7 @@ def run_simple(condition: dict, sizes: dict[str, list[float]] | None, *, plan: P
                                             budget=LoopBudget(gpt_repairs=0, min_soft_cost=math.inf,
                                                               search_seconds=repair_seconds),
                                             beam_width=beam_width, candidate_limit=candidate_limit, relocate=True,
-                                            rounds=max(repair_rounds, 3), first=keep_sizes).run(fresh[0][1])
+                                            rounds=max(repair_rounds, 3), first=required_ids).run(fresh[0][1])
                     trace_n["alone_from_scratch"] = required_issues(r_critic, candidate)
                     if required_issues(r_critic, candidate) < required_issues(r_critic, alone):
                         alone, how = candidate, "search from scratch"
@@ -577,7 +566,7 @@ def run_simple(condition: dict, sizes: dict[str, list[float]] | None, *, plan: P
             dropped: list[str] = []
             filler = Loop(geometry, plan, fixed_sizes, catalog, critic, locked_parents=locked,
                           budget=LoopBudget(gpt_repairs=0, min_soft_cost=math.inf), beam_width=beam_width,
-                          candidate_limit=candidate_limit, resize=resize, keep_sizes=keep_sizes)
+                          candidate_limit=candidate_limit)
             for i in sorted(expansion, key=lambda i: (depth(i), -area(i), i)):
                 parent = plan.parents.get(i)
                 if parent in original and parent not in current:
@@ -633,7 +622,7 @@ def run_simple(condition: dict, sizes: dict[str, list[float]] | None, *, plan: P
     review = {"result": "skipped"}
     review_ask = semantic_ask or (make_ask(model, base_url, api_key) if llm else None)
     if semantic and review_ask is not None:
-        current_sizes = {i: list(b["target_size_local_m"]) for i, b in placed.items()}  # resized ones stay resized
+        current_sizes = {i: list(b["target_size_local_m"]) for i, b in placed.items()}
         reviewer = SemanticPass(geometry, critic, plan, current_sizes, catalog, locked_parents=locked, ask=review_ask,
                                 stage="room", soft_tolerance=soft_tolerance, condition=condition,
                                 beam_width=beam_width, candidate_limit=candidate_limit)
@@ -682,9 +671,6 @@ def run_simple(condition: dict, sizes: dict[str, list[float]] | None, *, plan: P
                                        "unresolved": [v.as_dict() for v in final.hard],
                                        "status_detail": "hard_valid" if not final.hard else "violations_remaining"},
                             "hard_issues": [v.as_dict() for v in final.hard],
-                            "resized": {i: {"from": [round(v, 4) for v in fixed_sizes[i]],
-                                            "to": [round(v, 4) for v in placed[i]["target_size_local_m"]]}
-                                        for i in placed if placed[i]["target_size_local_m"] != fixed_sizes[i]},
                             "robot": RobotChecker.for_critic(robot, critic).report(layout, dict(plan.parents))
                             if robot is not None else None,
                             "repair": {"relocate": relocate, "rounds": repair_rounds, "seconds": repair_seconds},

@@ -26,7 +26,7 @@ def run_draft_workflow(condition: dict, sizes: dict[str, list[float]] | None, *,
                        sizer=None, yaws: dict[str, float] | None = None, yaw_mode: str = "llm",
                        critic: bool = True, gpt_repairs: int = 2, loop_budget: LoopBudget | None = None,
                        templates_path: str | None = None, placement: str = "simple", semantic: bool = True,
-                       semantic_ask=None, robot=None, drafts: int = 1, resize: bool = False,
+                       semantic_ask=None, robot=None, drafts: int = 1,
                        robot_margin: float = 0.0, hard_zones: bool = False, relocate: bool = False,
                        repair_rounds: int = 1, repair_seconds: float | None = None, draft_sizes: bool = False,
                        required: set[str] | None = None, articulation: set[str] | None = None) -> dict:
@@ -52,7 +52,7 @@ def run_draft_workflow(condition: dict, sizes: dict[str, list[float]] | None, *,
     by ``critic.Critic`` on the whole room (hard violations with magnitudes first, then the soft costs: relations,
     relation templates, access), sizes never shrink, and up to ``gpt_repairs`` GPT repair requests are made when the
     program search fails (none without ``llm``). Polish moves go through the same rule, and the final assessment is
-    recorded. ``critic=False`` is the v4 workflow (soft doors, local repair, shrinking allowed).
+    recorded. ``critic=False`` is the v4 workflow (soft doors, local repair). No path resizes an object.
 
     ``placement`` (with the critic): "simple" (default in workflow 2; ``simple.run_simple``): one LLM call places the
     room, the program checks once (one repair pass over hard violations only), the LLM reviews once. "staged"
@@ -112,7 +112,7 @@ def run_draft_workflow(condition: dict, sizes: dict[str, list[float]] | None, *,
                                 catalog_path=catalog_path, llm=llm, model=model, base_url=base_url, api_key=api_key,
                                 repair=repair, semantic=semantic, semantic_ask=semantic_ask,
                                 templates_path=templates_path, beam_width=beam_width, candidate_limit=candidate_limit,
-                                robot=robot, drafts=drafts, resize=resize, robot_margin=robot_margin,
+                                robot=robot, drafts=drafts, robot_margin=robot_margin,
                                 hard_zones=hard_zones, relocate=relocate, repair_rounds=repair_rounds,
                                 repair_seconds=repair_seconds, draft_sizes=draft_sizes, required=required,
                                 articulation=articulation)

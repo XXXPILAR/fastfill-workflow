@@ -30,10 +30,11 @@ RESIZE_LEVELS = (1, 2, 3, 4)
 class FixedSizes:
     """Catalog interface for the solver with one size per object; ``shrunk`` scales it uniformly by 5 or 10 %,
     never below the train catalog's 15th percentile on an axis (and never growing an axis already below it).
-    ``allow_shrink=False`` (the critic loop's default) keeps every size: a bounded search that finds no full-size
-    pose does not show that the size cannot fit, and shrinking would trade size accuracy for fewer collisions."""
+    ``allow_shrink=False`` (the default; every workflow path uses it) keeps every size: a bounded search that finds no
+    full-size pose does not show that the size cannot fit, and shrinking would trade size accuracy for fewer
+    collisions. The shrink levels stay only for tests of the solver."""
 
-    def __init__(self, sizes: dict[str, list[float]], catalog: SizeCatalog, allow_shrink: bool = True,
+    def __init__(self, sizes: dict[str, list[float]], catalog: SizeCatalog, allow_shrink: bool = False,
                  levels: tuple[int, ...] = (1, 2), floor: bool = True, keep: frozenset = frozenset()):
         """``levels``: the shrink levels the search may try, in order (``SHRINK_FACTORS``); ``floor=False`` drops the
         catalog's 15th-percentile floor (the size fallback: a smaller model of the object, such as a queen bed for

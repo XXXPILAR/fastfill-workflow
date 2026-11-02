@@ -106,9 +106,9 @@ class TaskInputsTests(unittest.TestCase):
         objects = json.loads(request_text(cond, plan, sizes, required={"bed"}))["objects"]
         self.assertEqual([o["id"] for o in objects if o.get("required")], ["bed"])
         self.assertIn('"required": true', REQUIRED_RULE)
-        fixed = FixedSizes(sizes, SizeCatalog(CATALOG), allow_shrink=True, levels=(1,), floor=False, keep={"bed"})
+        fixed = FixedSizes(sizes, SizeCatalog(CATALOG))  # the workflow never shrinks an object
         self.assertEqual(fixed.shrunk({"id": "bed", "category": "bed"}, 1), [])
-        self.assertTrue(fixed.shrunk({"id": "desk", "category": "desk"}, 1))
+        self.assertEqual(fixed.shrunk({"id": "desk", "category": "desk"}, 1), [])
 
 
 class TaskModeRunTests(unittest.TestCase):
@@ -120,14 +120,14 @@ class TaskModeRunTests(unittest.TestCase):
         cls.sizes = {"bed": [2.1, 1.6, .5], "nightstand": [.45, .45, .55], "desk": [.6, 1.2, .75],
                      "chair": [.5, .5, .9], "lamp": [.25, .25, .45]}
         cls.result = simple.run_simple(cls.cond, cls.sizes, catalog_path=CATALOG, llm=False, robot=Robot(width_m=.5),
-                                       required={"bed", "nightstand"}, articulation={"nightstand"}, resize=True,
+                                       required={"bed", "nightstand"}, articulation={"nightstand"},
                                        relocate=True, repair_seconds=20)
 
     def test_required_objects_stay_whole_and_the_result_says_what_happened(self):
         task = self.result["diagnostics"]["task"]
         boxes = {o["id"]: o for o in self.result["layout"]["objects"]}
         self.assertTrue({"bed", "nightstand"} <= set(boxes))
-        self.assertEqual(boxes["bed"]["target_size_local_m"], self.sizes["bed"])
+        self.assertTrue(all(b["target_size_local_m"] == self.sizes[i] for i, b in boxes.items()))  # no resizing
         self.assertEqual((task["required"], task["articulation"], task["expansion"]),
                          (["bed", "nightstand"], ["nightstand"], 3))
         self.assertEqual(task["expansion_kept"], len(boxes) - 2)

@@ -46,7 +46,7 @@ from .catalog import SizeCatalog
 from .critic import WEIGHTS, Assessment, Critic, Violation  # WEIGHTS' keys are the soft codes
 from .drafting import WALL_BOTTOM_M
 from .geometry import Geometry
-from .local_repair import DRAFT_WEIGHT, RESIZE_LEVELS, FixedSizes, _with_children
+from .local_repair import DRAFT_WEIGHT, FixedSizes, _with_children
 from .planning import Plan, _number
 from .solver import _pose, _wrap, beam_search
 
@@ -107,11 +107,9 @@ class Loop:
     def __init__(self, geometry: Geometry, plan: Plan, sizes: dict[str, list[float]], catalog: SizeCatalog,
                  critic: Critic, *, locked_parents: dict[str, str], ask=None, budget: LoopBudget | None = None,
                  beam_width: int = 24, candidate_limit: int = 48, draft_weight: float = DRAFT_WEIGHT,
-                 resize: bool = False, relocate: bool = False, rounds: int = 1, keep_sizes: frozenset = frozenset(),
-                 first: frozenset = frozenset()):
-        """``resize``: the search may shrink an object by up to 20 % (``local_repair.RESIZE_LEVELS``, below the
-        catalog's floor) when no full-size pose fits: the size fallback for rooms too small for what they hold;
-        never the ids in ``keep_sizes`` (the task's required objects). ``first``: violations holding one of these ids
+                 relocate: bool = False, rounds: int = 1, first: frozenset = frozenset()):
+        """Every object keeps its size: the search moves and turns objects, never resizes one. ``first``: violations
+        holding one of these ids
         (the task's required objects) are taken up before the others of their tier.
         ``relocate``: robot issues the local search cannot fix try moving their blocker anywhere in the room.
         ``rounds``: passes over the issues; a new pass starts only when the last one accepted a change and hard
@@ -121,8 +119,7 @@ class Loop:
         self.ask = ask
         self.budget = budget or LoopBudget()
         self.beam_width, self.candidate_limit, self.draft_weight = beam_width, candidate_limit, draft_weight
-        self.fixed_sizes = FixedSizes(sizes, catalog, allow_shrink=resize, levels=RESIZE_LEVELS, floor=False,
-                                      keep=keep_sizes) if resize else FixedSizes(sizes, catalog, allow_shrink=False)
+        self.fixed_sizes = FixedSizes(sizes, catalog, allow_shrink=False)
         self.relocate, self.rounds = relocate, max(1, rounds)
         self.first = frozenset(first)
         self.search_s = 0.

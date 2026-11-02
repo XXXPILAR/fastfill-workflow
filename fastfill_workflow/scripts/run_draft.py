@@ -70,7 +70,7 @@ def preflight(settings: dict, attempts: int = 6) -> None:
 def run_room(condition: dict, sizes: dict | None, yaws: dict | None, size_error: str | None, catalog: str,
              settings: dict, yaw_mode: str, critic: bool = True, gpt_repairs: int = 2,
              placement: str = "simple", semantic: bool = True, robot=None, drafts: int = 1,
-             resize: bool = False, robot_margin: float = 0.0, hard_zones: bool = False,
+             robot_margin: float = 0.0, hard_zones: bool = False,
              tag: str | None = None, relocate: bool = False, repair_rounds: int = 1,
              repair_seconds: float | None = None, repair: bool = True,
              draft_sizes: bool = False, roles: dict | None = None) -> tuple[dict, float, dict, int]:
@@ -83,7 +83,7 @@ def run_room(condition: dict, sizes: dict | None, yaws: dict | None, size_error:
         result = run_draft_workflow(condition, sizes, catalog_path=catalog, polish=critic, model=settings["model"],
                                     base_url=settings["base_url"], api_key=settings["api_key"], yaws=yaws,
                                     yaw_mode=yaw_mode, critic=critic, gpt_repairs=gpt_repairs, placement=placement,
-                                    semantic=semantic, robot=robot, drafts=drafts, resize=resize,
+                                    semantic=semantic, robot=robot, drafts=drafts,
                                     robot_margin=robot_margin, hard_zones=hard_zones, relocate=relocate,
                                     repair_rounds=repair_rounds, repair_seconds=repair_seconds, repair=repair,
                                     draft_sizes=draft_sizes, **(roles or {}))
@@ -166,8 +166,6 @@ def main() -> None:
                     "the robot's centre may stay from a side it works at (m)")
     ap.add_argument("--drafts", type=int, default=1, help="simple: placement calls in parallel; the one with the fewest "
                     "hard violations is repaired (each call is paid)")
-    ap.add_argument("--resize", action="store_true", help="simple: when repair leaves legality violations, retry "
-                    "with objects up to 20 %% smaller (reported in diagnostics.resized)")
     ap.add_argument("--robot-margin", type=float, default=0.0, help="with --robot-width: placement, critic and search "
                     "plan for a robot this much wider (m); the result is reported at --robot-width")
     ap.add_argument("--hard-zones", action="store_true", help="with --robot-width: fix each carrying furniture's "
@@ -195,8 +193,8 @@ def main() -> None:
     a = ap.parse_args()
     if (a.robot_margin or a.hard_zones) and not a.robot_width:
         raise SystemExit("--robot-margin / --hard-zones need --robot-width")
-    if (a.drafts > 1 or a.resize) and (a.placement != "simple" or a.no_critic):
-        raise SystemExit("--drafts / --resize work with --placement simple only")
+    if a.drafts > 1 and (a.placement != "simple" or a.no_critic):
+        raise SystemExit("--drafts works with --placement simple only")
     robot = Robot(width_m=a.robot_width, arm_m=a.robot_arm) if a.robot_width else None
     if robot and (a.placement != "simple" or a.no_critic):
         raise SystemExit("--robot-width works with --placement simple only")
@@ -231,7 +229,7 @@ def main() -> None:
         "robot": {"width_m": a.robot_width, "arm_m": a.robot_arm, "margin_m": a.robot_margin,
                   "hard_zones": a.hard_zones} if a.robot_width else None,
         "repair": {"off": a.no_repair, "relocate": a.relocate, "rounds": a.repair_rounds, "seconds": a.repair_seconds},
-        "drafts": a.drafts, "resize": a.resize, "task_roles": a.task_roles,
+        "drafts": a.drafts, "task_roles": a.task_roles,
         "budget_usd": a.budget_usd,
         "rooms": len(picked)}, indent=1))
 
@@ -273,7 +271,7 @@ def main() -> None:
                 i = pending.pop(0)
                 running[pool.submit(run_room, rows[i]["condition"], sizes[i], yaws[i], size_errors.get(i),
                                     str(a.catalog), settings, a.yaw_mode, not a.no_critic, a.gpt_repairs,
-                                    a.placement, not a.no_semantic, robot, a.drafts, a.resize, a.robot_margin,
+                                    a.placement, not a.no_semantic, robot, a.drafts, a.robot_margin,
                                     a.hard_zones, tag=f"room_{i:03d}", relocate=a.relocate,
                                     repair_rounds=a.repair_rounds, repair_seconds=a.repair_seconds,
                                     repair=not a.no_repair, draft_sizes=a.draft_sizes,
