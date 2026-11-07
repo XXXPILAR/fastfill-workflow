@@ -74,6 +74,8 @@ mkdir -p runs && mv runs-hf/main4-cell05-v4detail-e5-1.7b-all-full runs/
 
 `model-step-4500/` 旁边必须有 `tokenizer/`，代码会从那里读取分词器。
 
+模型是用 transformers 5.14.1 训练和保存的，要按 `requirements.txt` 的版本安装：transformers 4.x 读不了它的分词器（`extra_special_tokens` 的格式不同）。这组版本在 Mac（Apple MPS）上跑通过完整流程，算出的尺寸和 GH200 上的只差 0.006 mm。
+
 ## 输入：一行一个房间（`rows.jsonl`）
 
 ```json
