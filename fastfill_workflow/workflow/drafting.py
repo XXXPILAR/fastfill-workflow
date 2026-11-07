@@ -1,7 +1,7 @@
 """Step ③ of the draft workflow: one LLM call places every object at its fixed size.
 
 Sizes come from step ② (one per object, e.g. FastFill's prediction); support, priority, groups and relations from
-step ① (``make_plan(..., semantic_only=True)``). The LLM answers positions and yaws only; heights follow from the
+step ① (``make_plan``). The LLM answers positions and yaws only; heights follow from the
 support (the floor, a wall-mounted default, or the top of the parent), and sizes stay the given ones whatever the
 answer says. With ``free_sizes`` (the workflow without FastFill) the request gives no sizes and the LLM answers each
 object's size with its pose (``FREE_SIZE_INSTRUCTIONS``); an object it gives no valid size keeps the given one. An object the answer misses or gets wrong is still placed (on its parent, else at the room's
@@ -14,7 +14,7 @@ import json
 import math
 
 from . import llm as llm_client
-from .geometry import Geometry
+from .geometry import KEEPOUT_DEPTH_M, KEEPOUT_SIDE_M, Geometry
 from .planning import Plan, _number
 from .solver import _pose
 
@@ -36,8 +36,12 @@ Rules:
 degrees from the world +x axis; the depth axis points along it.
 - An object supported by another object sits on top of it: give x, y within the parent's top.
 - Hard constraints must hold. Keep objects inside the floor polygon, off each other and off fixed objects, and keep \
-doors clear. Follow the plan's groups and relations where you can.
-- Wall-supported objects hang with their back against a wall, facing into the room."""
+doors clear: nothing at any height (no furniture, nothing hung on the wall, nothing on top of something) within 1.0 m \
+in front of a door, from 0.15 m left of it to 0.15 m right of it; only a rug or mat may lie there. Follow the plan's \
+groups and relations where you can.
+- Wall-supported objects hang with their back against a wall, facing into the room, never over a window."""
+# the keepout the critic enforces (geometry's door rule "keepout"), as the rule above words it
+assert f"{KEEPOUT_DEPTH_M:.1f} m in front of a door, from {KEEPOUT_SIDE_M:.2f} m" in DRAFT_INSTRUCTIONS
 
 # the draft without FastFill: the LLM gives every size with the pose (the request has no size_m)
 FIXED_SIZE_TEXT = """Every object's size is already fixed (size_m: width = left-right as seen from its front, depth = \
@@ -201,8 +205,10 @@ def assemble(geometry: Geometry, plan: Plan, sizes: dict[str, list[float]],
         else:
             x, y, yaw = pose["x"], pose["y"], pose["yaw_rad"]
         if parent == "floor":
+            x, y = geometry.push_inside(size, x, y, yaw)  # flush with (or a few cm through) a wall: just inside it
             z = geometry.floor
         elif parent == "wall":
+            x, y, yaw = geometry.snap_to_wall(size, x, y, yaw)  # hung on the nearest wall, back against it
             top = geometry.ceiling - size[2] - .03
             given = pose.get("z") if pose else None
             z = geometry.floor + given if given is not None and 0 <= given <= top - geometry.floor else \
@@ -250,51 +256,3 @@ def make_draft(condition: dict, plan: Plan, sizes: dict[str, list[float]], geome
                     sized_by_draft=sorted(drafted))
     placed, info["missing"] = assemble(geometry, plan, sizes, poses)
     return placed, info
-
-
-ALL_OBJECTS_RULE = "- Include every object id exactly once; do not add or remove objects."
-assert ALL_OBJECTS_RULE in DRAFT_INSTRUCTIONS
-# step-by-step placement (orders B / C): the rule above is replaced, not contradicted
-PARTIAL_INSTRUCTIONS = DRAFT_INSTRUCTIONS.replace(ALL_OBJECTS_RULE, """\
-- Each object has a status. "placed": already placed, with its pose; it stays where it is: treat it like a fixed \
-object. "place_now": place these, and answer for these only, each exactly once. "later": placed afterwards; do not \
-answer for them, but leave sensible room for them. Do not add objects.""")
-
-
-def partial_request_text(condition: dict, plan: Plan, sizes: dict[str, list[float]], ids: list[str],
-                         placed: dict[str, dict], yaws: dict[str, float] | None = None) -> str:
-    """``request_text`` with every object's status: placed (with its pose), place_now, or later (size only)."""
-    payload = json.loads(request_text(condition, plan, sizes, yaws))
-    now = set(ids)
-    for entry in payload["objects"]:
-        ident = entry["id"]
-        if ident in placed:
-            box = placed[ident]
-            entry.update(status="placed", x=round(box["bottom_center_m"][0], 3), y=round(box["bottom_center_m"][1], 3),
-                         z=round(box["bottom_center_m"][2], 3), yaw_deg=round(math.degrees(box["yaw_rad"]), 1))
-            entry.pop("suggested_yaw_deg", None)
-        else:
-            entry["status"] = "place_now" if ident in now else "later"
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def make_partial_draft(condition: dict, plan: Plan, sizes: dict[str, list[float]], geometry: Geometry,
-                       ids: list[str], placed: dict[str, dict], *, yaws: dict[str, float] | None = None,
-                       model: str | None = None, base_url: str | None = None,
-                       api_key: str | None = None) -> tuple[dict[str, dict], dict]:
-    """One LLM call placing only ``ids`` beside the ``placed`` boxes (which stay); returns (placed with the new
-    boxes, info) as ``make_draft``. Parents of ``ids`` must be placed already or be among ``ids``."""
-    info: dict = {"calls": [], "dropped": {}, "missing": [], "error": None}
-    poses: dict[str, dict] = {}
-    try:
-        instructions = PARTIAL_INSTRUCTIONS + (SUGGESTED_YAW_RULE if yaws else "")
-        text, call = llm_client.ask(instructions, partial_request_text(condition, plan, sizes, ids, placed, yaws),
-                                    model=model, base_url=base_url, api_key=api_key)
-        info["calls"].append(call)
-        poses, info["dropped"] = parse_poses(text, set(ids))
-    except (RuntimeError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        if isinstance(exc, ValueError) and "requires --model" in str(exc):
-            raise
-        info["error"] = f"{type(exc).__name__}: {exc}"[:300]
-    new, info["missing"] = assemble(geometry, plan, sizes, poses, ids=ids, placed=placed)
-    return new, info

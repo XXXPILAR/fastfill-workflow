@@ -56,6 +56,7 @@ from fastfill.v2.ops import layout_quality as lq
 from fastfill.validate import SEAT, TABLE
 
 from .geometry import Geometry, Issue, footprint
+from .planning import Plan
 
 TEMPLATES = Path(__file__).resolve().parents[1] / "critic_templates.json"
 WALL_RULES = Path(__file__).resolve().parents[1] / "critic_wall_rules.json"
@@ -322,6 +323,13 @@ def unreachable(floor: Polygon, bs: list[dict], fixed: list[Polygon], doors: lis
     return out
 
 
+def critic_geometry(condition: dict, plan: Plan) -> Geometry:
+    """The critic's rules: doors kept clear by infinite-task-world's entry keepout (door_rule "keepout", since
+    2026-11-05; "evaluator" before), windows soft except for a wall object hung over one."""
+    return Geometry(condition, plan.parents, plan.relations, hard_doors=True, hard_windows=False, door_rule="keepout",
+                    wall_windows=True)
+
+
 class Critic:
     def __init__(self, geometry: Geometry, user_soft: list[dict], plan_soft: list[dict], templates: list[dict],
                  wall_rules: dict | None = None):
@@ -344,12 +352,6 @@ class Critic:
         user = [r for r in geometry.explicit if not r.get("hard", True)]
         return cls(geometry, user, list(plan.relations), load_templates() if templates is None else templates, wall_rules)
 
-    def with_geometry(self, geometry: Geometry) -> "Critic":
-        critic = Critic.__new__(Critic)
-        critic.__dict__.update(self.__dict__)
-        critic.g = geometry
-        return critic
-
     # ---------------------------------------------------------------- hard
     def _hard_magnitude(self, issue: Issue, placed: dict[str, dict]) -> float:
         g, code = self.g, issue.code
@@ -367,8 +369,8 @@ class Critic:
             return max(g.floor - z, z + height - g.ceiling, .01)
         if code == "floor_support":
             return abs(z - g.floor)
-        if code == "wall_support":
-            return max(shape.distance(g.polygon.exterior), .01)
+        if code == "wall_support":  # the back's gap to a wall it faces away from (1 m when it faces none)
+            return max(min(g.wall_gap(box), 1.), .01)
         if code == "object_support":
             parent = placed.get(issue.ids[1], g.fixed.get(issue.ids[1]))
             if parent is None:
@@ -376,7 +378,8 @@ class Critic:
             surface = g._support_polygon(box, issue.ids[1], parent)
             return max(abs(z - g._support_height(box, issue.ids[1], parent)) + surface.distance(shape.centroid), .01)
         if code == "door_clearance":
-            return max((_sqrt_area(g.door_overlap(box, zone, opening)) for zone, opening in g.doors), default=.01)
+            return max((_sqrt_area(g.door_overlap(box, zone, opening)) for zone, opening in g.clearance_doors),
+                       default=.01)
         if code == "window_clearance":
             return max((_sqrt_area(shape.intersection(strip).area) for strip, _ in g.windows), default=.01)
         if code == "keepout":
@@ -490,7 +493,7 @@ class Critic:
         bs = self._quality_boxes(placed)
         out += self._templates(bs) + self._access(bs) + self._wall_back(bs) + self._reach(bs)
         for box in placed.values():
-            for issue in self.g.opening_issues(box, doors=not self.g.hard_doors, windows=not self.g.hard_windows):
+            for issue in self.g.opening_issues(box, doors=not self.g.hard_doors, windows=self.g.soft_windows_for(box)):
                 code = "door" if issue.code == "door_clearance" else "window"
                 out.append(Violation(code, issue.ids, self._hard_magnitude(issue, placed), WEIGHTS[code]))
         return out
@@ -511,11 +514,3 @@ class Critic:
         if candidate.soft_total < current.soft_total - EPS_S:
             return True, "soft cost lower" if not current.hard else "same hard violations, soft cost lower"
         return False, "soft cost not lower"
-
-    @staticmethod
-    def not_worse(candidate: Assessment, current: Assessment) -> bool:
-        """For moves that need no gain (polish's wall snap / axis alignment): nothing gets worse."""
-        if current.hard_count == 0 and candidate.hard_count:
-            return False
-        return candidate.hard_count <= current.hard_count and \
-            candidate.hard_magnitude <= current.hard_magnitude + 1e-9 and candidate.soft_total <= current.soft_total + 1e-9

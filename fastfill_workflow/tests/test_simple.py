@@ -4,9 +4,8 @@ import json
 import unittest
 from pathlib import Path
 
-from test_staged import SIZES, FakeLLM, _room  # shared fixtures
+from test_semantic import SIZES, FakeLLM, _room  # shared fixtures
 from workflow import credentials
-from workflow.loop import LoopBudget
 from workflow.pipeline import run_draft_workflow
 from workflow.planning import make_plan
 from workflow.robot import Robot
@@ -49,7 +48,7 @@ class SimpleTests(unittest.TestCase):
 
     def test_one_review_round_of_the_whole_room(self):
         llm = FakeLLM()
-        plan = make_plan(_room(), llm=False, semantic_only=True)
+        plan = make_plan(_room(), llm=False)
         result = run_simple(_request(), SIZES, plan=plan, catalog_path=str(CATALOG), llm=False, semantic_ask=llm)
         review = result["diagnostics"]["semantic"]
         self.assertEqual(review["stage"], "room")
@@ -60,7 +59,7 @@ class SimpleTests(unittest.TestCase):
 
     def test_review_never_breaks_legality(self):
         llm = FakeLLM(fix={"x": 2.5, "y": 2.95, "yaw_deg": 0})  # a fix that drops the chair into the bed
-        plan = make_plan(_room(), llm=False, semantic_only=True)
+        plan = make_plan(_room(), llm=False)
         result = run_simple(_request(), SIZES, plan=plan, catalog_path=str(CATALOG), llm=False, semantic_ask=llm)
         d = result["diagnostics"]
         self.assertLessEqual(d["assessments"]["final"]["hard_count"], d["assessments"]["after_check"]["hard_count"])
@@ -73,9 +72,8 @@ class SimpleTests(unittest.TestCase):
         self.assertEqual(d["robot"]["ok"], not robot_hard)
         self.assertIsNone(run_simple(_request(), None, catalog_path=str(CATALOG), llm=False)["diagnostics"]["robot"])
 
-    def test_pipeline_default_is_simple(self):
-        result = run_draft_workflow(_request(), None, catalog_path=str(CATALOG), llm=False,
-                                    loop_budget=LoopBudget(gpt_repairs=0))
+    def test_pipeline_runs_the_simple_workflow(self):
+        result = run_draft_workflow(_request(), None, catalog_path=str(CATALOG), llm=False)
         self.assertEqual(result["diagnostics"]["placement"], "simple")
         self.assertIn("plan", result["timing_s"])
 

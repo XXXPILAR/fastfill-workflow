@@ -1,5 +1,5 @@
-"""The LLM semantic review of the staged workflow (``staged``): the program checks legality and usability, the LLM
-checks whether the arrangement makes sense, and the LLM only ever proposes.
+"""Step ⑤ of ``simple``: the LLM semantic review. The program checks legality and usability, the LLM checks whether
+the arrangement makes sense, and the LLM only ever proposes.
 
 One pass over a set of objects (``SemanticPass.run``):
   review    one request with the room, the user's requirements (each object's description, the input's
@@ -30,10 +30,9 @@ import time
 
 from .catalog import SizeCatalog
 from .credentials import FatalAPIError
-from .critic import EPS_H, EPS_S, Assessment, Critic, Violation
+from .critic import EPS_H, EPS_S, Assessment, Critic
 from .geometry import Geometry
-from .local_repair import _with_children
-from .loop import REPAIR_INSTRUCTIONS, FocusedLoop, Loop, LoopBudget, _describe
+from .loop import FocusedLoop, Loop, LoopBudget, _describe, _with_children
 from .planning import Plan
 
 SEVERITIES = ("severe", "moderate", "minor")
@@ -97,7 +96,12 @@ program resolves small overlaps afterwards, and the change is kept only if a sec
 
 """ + REQUIREMENT_RULES + """ The reviewer can be wrong: do not break a description or constraint to follow it.
 
-""" + REPAIR_INSTRUCTIONS[REPAIR_INSTRUCTIONS.index("Answer with"):]
+"""
+FIX_INSTRUCTIONS += """Answer with one JSON object only, no prose:
+{"objects": {"<id>": {"x": x, "y": y, "yaw_deg": a}}}
+Only movable objects may appear; leave out those that should stay. x, y: bottom-centre in world metres; yaw_deg: the direction the object's front faces, counter-clockwise degrees from world +x. An object whose "support_changeable" is true may also get "support": "floor", "wall" or another object's id when its current support cannot hold it; objects on a moved parent move with it unless you give them a pose. Do not change sizes.
+
+Fix the listed problems without creating new ones: stay inside the floor polygon, off other objects and fixed objects, keep door strips clear, keep the input's constraints. Prefer small moves; keep related furniture together (seats with their table, nightstands beside the bed, etc.)."""
 
 PAIRWISE_INSTRUCTIONS = """You compare two arrangements of the same room. The user message is JSON: the room, the \
 user's "requirements", the objects that are the same in both ("unchanged"), objects still to be placed ("pending"), \
@@ -226,10 +230,7 @@ class SemanticPass:
 
     def propose(self, issue: dict, scope: set[str], placed: dict[str, dict],
                 current: Assessment) -> tuple[dict[str, dict], dict[str, str]] | None:
-        target = Violation("semantic", tuple(issue["ids"]), 1.)
-        payload = json.loads(self.loop._payload(scope, target, current, placed))
-        payload.pop("problems", None)
-        payload.pop("rejected_attempts", None)
+        payload = json.loads(self.loop._payload(scope, placed))
         for entry in payload["objects"]:
             entry["description"] = self.objects[entry["id"]].get("description", "")
         requirements = self.requirements()
@@ -247,7 +248,7 @@ class SemanticPass:
 
     def repair(self, candidate: dict[str, dict], scope: set[str]) -> tuple[dict[str, dict], dict]:
         # every hard issue of the moved objects tried; ``repair_seconds`` (default: none) is a time limit
-        budget = LoopBudget(gpt_repairs=0, search_seconds=self.repair_seconds, min_soft_cost=math.inf)
+        budget = LoopBudget(search_seconds=self.repair_seconds, min_soft_cost=math.inf)
         loop = FocusedLoop(self.g, self.plan, self.sizes, self.catalog, self.critic, locked_parents=self.locked,
                            budget=budget, movable=scope, beam_width=self.beam_width,
                            candidate_limit=self.candidate_limit)

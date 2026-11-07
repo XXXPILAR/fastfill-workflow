@@ -7,10 +7,13 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
-# The FastFill package sits beside this folder: <repo>/fastfill/ next to <repo>/fastfill_workflow/.
-_main = Path(__file__).resolve().parents[2]
-if not (_main / "fastfill" / "v2").is_dir():
-    raise RuntimeError(f"Expected the FastFill package at {_main / 'fastfill'}")
+# The FastFill package: the copy bundled in this folder (``fastfill/``, the files the workflow and FastFill inference
+# need, fastfill/SOURCE.json), else a sibling ``fastfill-main/`` or the checkout this folder sits in.
+_here = Path(__file__).resolve().parents[1]
+_parent = _here.parent
+_main = next((p for p in (_here, _parent / "fastfill-main", _parent) if (p / "fastfill" / "v2").is_dir()), None)
+if _main is None:
+    raise RuntimeError(f"Expected the FastFill package at {_here}, {_parent / 'fastfill-main'} or {_parent}")
 sys.path.insert(0, str(_main))
 
 from fastfill.v2.schema import validate_condition, validate_layout  # noqa: E402

@@ -7,7 +7,7 @@ from collections import Counter
 from dataclasses import dataclass
 
 from .catalog import SizeCatalog
-from .geometry import Geometry, footprint
+from .geometry import WALL_GAP_M, Geometry, footprint
 from .planning import Plan
 
 
@@ -53,7 +53,7 @@ def _order(geometry: Geometry, catalog: SizeCatalog, plan: Plan, subset: set[str
         # the plan's priority (1 = first) leads; objects it does not rank follow, by size and relation count
         chosen = max(ready, key=lambda ident: (ident in plan.priority, -plan.priority.get(ident, 0), _priority(
                      geometry.requests[ident],
-                     catalog.candidates(geometry.requests[ident], plan.size_hints.get(ident))[0][0], geometry)))
+                     catalog.candidates(geometry.requests[ident])[0][0], geometry)))
         result.append(chosen)
         pending.remove(chosen)
         done.add(chosen)
@@ -104,7 +104,7 @@ class CandidateGenerator:
         level = self.shrink.get(ident)
         if level:
             return self.catalog.shrunk(request, level)
-        return self.catalog.candidates(request, self.plan.size_hints.get(ident))
+        return self.catalog.candidates(request)
 
     def _draft_cost(self, box: dict) -> float:
         draft = self.plan.draft_poses.get(box["id"])
@@ -117,7 +117,6 @@ class CandidateGenerator:
         return self.draft_weight * (math.hypot(x - draft["x"], y - draft["y"]) + turn)
 
     def _unary(self, box: dict, size_score: float, origin: str) -> float:
-        ident = box["id"]
         area = box["target_size_local_m"][0] * box["target_size_local_m"][1]
         edge = min(footprint(box).distance(self.g.polygon.exterior), 1.0)
         wall_weight = .55 if area > .7 else .12
@@ -137,7 +136,6 @@ class CandidateGenerator:
     def _generic(self, ident: str) -> list[Candidate]:
         if ident in self.cache:
             return self.cache[ident]
-        request = self.g.requests[ident]
         parent = self.plan.parents[ident]
         if parent not in {"floor", "wall"}:
             return []
@@ -150,6 +148,8 @@ class CandidateGenerator:
 
         def add(size: list[float], size_score: float, x: float, y: float, yaw: float,
                 z: float, origin: str) -> None:
+            if parent == "wall":  # hung on the nearest wall, back against it (geometry.WALL_CONTACT_M)
+                x, y, yaw = self.g.snap_to_wall(size, x, y, yaw)
             box = _pose(ident, size, x, y, z, yaw, parent)
             if not self.g.check_box(box, {}):
                 proposals.append(Candidate(box, self._unary(box, size_score, origin), origin))
@@ -167,7 +167,7 @@ class CandidateGenerator:
                 count = max(2, math.ceil(length / self.density))
                 for j in range(count):
                     t = (j + .5) / count
-                    for offset in ((.03,) if parent == "wall" else (.04, .35)):
+                    for offset in ((WALL_GAP_M,) if parent == "wall" else (.04, .35)):
                         x = a[0] + t * dx + (extent + offset) * nx
                         y = a[1] + t * dy + (extent + offset) * ny
                         z = (min(self.g.floor + 1.15, self.g.ceiling - size[2] - .03)
@@ -414,51 +414,3 @@ def beam_search(geometry: Geometry, catalog: SizeCatalog, plan: Plan, *, mode: s
     # every complete state of the last beam, best rank first (the critic loop picks among them by its own score)
     trace["complete"] = [s.placed for s in sorted(complete, key=lambda s: s.rank, reverse=True)]
     return (max(complete, key=lambda s: s.rank) if complete else None), trace
-
-
-def solve(geometry: Geometry, catalog: SizeCatalog, plan: Plan,
-          *, beam_width: int = 32, candidate_limit: int = 48) -> tuple[State | None, list[dict]]:
-    traces, solutions = [], []
-    for mode in ("balanced", "wall", "spacious"):
-        result, trace = beam_search(geometry, catalog, plan, mode=mode,
-                                    beam_width=beam_width, candidate_limit=candidate_limit, density=1)
-        traces.append(trace)
-        if result is not None:
-            solutions.append(result)
-    if not solutions:
-        result, trace = beam_search(geometry, catalog, plan, mode="expanded",
-                                    beam_width=max(beam_width * 3, 96),
-                                    candidate_limit=max(candidate_limit * 2, 90), density=1)
-        traces.append(trace)
-        if result is not None:
-            solutions.append(result)
-    return (max(solutions, key=lambda s: s.rank) if solutions else None), traces
-
-
-def repair(geometry: Geometry, catalog: SizeCatalog, plan: Plan, state: State,
-           *, rounds: int = 2) -> tuple[State, list[dict]]:
-    current, history = state, []
-    for _ in range(rounds):
-        before, issues = geometry.soft_score(current.placed)
-        if not issues:
-            break
-        target = issues[0].ids[0]
-        affected = {target}
-        changed = True
-        while changed:
-            old = len(affected)
-            affected.update(ident for ident, parent in plan.parents.items() if parent in affected)
-            changed = len(affected) != old
-        frozen = {ident: box for ident, box in current.placed.items() if ident not in affected}
-        proposal, trace = beam_search(geometry, catalog, plan, mode="repair",
-                                       beam_width=24, candidate_limit=72, density=1,
-                                       initial=frozen, subset=affected)
-        after = geometry.soft_score(proposal.placed)[0] if proposal is not None else before
-        committed = proposal is not None and after > before and not geometry.validate(proposal.placed)
-        history.append({"affected": sorted(affected), "before": before, "after": after,
-                        "committed": committed, "search": trace})
-        if committed:
-            current = proposal
-        else:
-            break
-    return current, history

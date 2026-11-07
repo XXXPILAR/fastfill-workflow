@@ -5,11 +5,10 @@ import unittest
 from pathlib import Path
 
 from workflow import simple
-from workflow.catalog import SizeCatalog
 from workflow.contract import validate_layout
 from workflow.critic import Violation
 from workflow.drafting import REQUIRED_RULE, request_text
-from workflow.local_repair import FixedSizes
+from workflow.loop import FixedSizes
 from workflow.planning import Plan, make_plan
 from workflow.robot import Robot, opens
 
@@ -101,12 +100,12 @@ class TaskInputsTests(unittest.TestCase):
 
     def test_required_objects_are_marked_in_the_request_and_never_shrunk(self):
         cond = condition()
-        plan = make_plan(cond, llm=False, semantic_only=True)
+        plan = make_plan(cond, llm=False)
         sizes = {o["id"]: [.5, .5, .5] for o in cond["objects"]}
         objects = json.loads(request_text(cond, plan, sizes, required={"bed"}))["objects"]
         self.assertEqual([o["id"] for o in objects if o.get("required")], ["bed"])
         self.assertIn('"required": true', REQUIRED_RULE)
-        fixed = FixedSizes(sizes, SizeCatalog(CATALOG))  # the workflow never shrinks an object
+        fixed = FixedSizes(sizes)  # the workflow never shrinks an object
         self.assertEqual(fixed.shrunk({"id": "bed", "category": "bed"}, 1), [])
         self.assertEqual(fixed.shrunk({"id": "desk", "category": "desk"}, 1), [])
 
@@ -137,8 +136,9 @@ class TaskModeRunTests(unittest.TestCase):
         self.assertTrue(task["required_ok"], task["required_issues"])  # this room has room for the task
         self.assertIn("tried", task["required_first"])
         self.assertIsInstance(task["expansion_issues"], list)
-        # an expansion object is only ever removed for a required one
-        self.assertTrue(all(d["step"] == "for the required objects" for d in task["removed"]))
+        # an expansion object is removed for a required one, or because it fits nowhere (④d)
+        self.assertTrue(all(d["step"] in ("for the required objects", "does not fit") for d in task["removed"]))
+        self.assertFalse([v for v in self.result["diagnostics"]["hard_issues"] if v["code"] in simple.PHYSICAL])
 
     def test_the_layout_is_valid_for_the_objects_kept(self):
         kept = {o["id"] for o in self.result["layout"]["objects"]}
@@ -161,6 +161,43 @@ class TaskModeRunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LeftOutTests(unittest.TestCase):
+    """④d: twelve expansion books on a 0.6 x 1.2 m desk (0.90 m2 of books on 0.72 m2) cannot all fit; those left
+    colliding are left out, the fewest, and nothing else is."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cond = condition()
+        cls.books = [f"book{i}" for i in range(12)]
+        cls.cond["objects"] += [{"id": b, "category": "book", "description": "a hardcover book", "support_parent": "desk"}
+                                for b in cls.books]
+        cls.sizes = {"bed": [2.1, 1.6, .5], "nightstand": [.45, .45, .55], "desk": [.6, 1.2, .75],
+                     "chair": [.5, .5, .9], "lamp": [.25, .25, .45], **{b: [.25, .3, .04] for b in cls.books}}
+        cls.result = simple.run_simple(cls.cond, cls.sizes, catalog_path=CATALOG, llm=False, robot=Robot(width_m=.5),
+                                       required={"bed", "nightstand"}, articulation={"nightstand"},
+                                       relocate=True, repair_seconds=10)
+
+    def test_what_does_not_fit_is_left_out_and_the_rest_is_legal(self):
+        task = self.result["diagnostics"]["task"]
+        kept = {o["id"] for o in self.result["layout"]["objects"]}
+        left_out = [d for d in task["removed"] if d["step"] == "does not fit"]
+        self.assertTrue(left_out)  # the desk cannot hold them all
+        self.assertTrue({"bed", "nightstand", "desk"} <= kept)
+        self.assertTrue(all(d["because"] and all(r.split()[0] in simple.PHYSICAL or r.startswith("no free place on desk")
+                                                 for r in d["because"]) for d in left_out))
+        self.assertFalse([v for v in self.result["diagnostics"]["hard_issues"] if v["code"] in simple.PHYSICAL])
+        books_kept = [b for b in self.books if b in kept]
+        # the top packed again (a 0.6 x 1.2 m desk holds 8 of these books): the lamp, the one of its kind, first
+        self.assertIn("lamp", kept)
+        self.assertGreaterEqual(len(books_kept), 6)
+        self.assertIn("after_left_out", self.result["diagnostics"]["stages"])
+
+    def test_the_wall_fronts_step_runs_after_it(self):
+        wall_clear = self.result["diagnostics"]["task"]["wall_clear"]  # ④e (test_wall_clear.py)
+        self.assertEqual(set(wall_clear), {"wall_objects", "below_need", "moved", "stuck"})
+        self.assertIn("wall_clear", self.result["timing_s"])
 
 
 class FallbackTests(unittest.TestCase):

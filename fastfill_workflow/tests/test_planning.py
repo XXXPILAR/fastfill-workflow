@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-import math
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from workflow import planning
-from workflow.pipeline import run_workflow
 from workflow.planning import make_plan
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,14 +78,12 @@ class LlmPlanTests(unittest.TestCase):
         with fake_llm(answer):
             plan = make_plan(self.condition)
         self.assertEqual(plan.source, "llm+rules")
-        self.assertEqual(plan.size_hints["bed"], [2.1, 1.6, .5])  # [depth, width, height]
-        self.assertNotIn("ns", plan.size_hints)
         self.assertEqual(plan.parents["ns"], "floor")    # self-support rejected
         self.assertEqual(plan.parents["lamp"], "ns")
         self.assertEqual(plan.parents["vase"], "floor")  # locked by the input
         self.assertEqual(plan.parents["art"], "wall")    # rule plan kept where the LLM is silent
         self.assertEqual(plan.priority, {"bed": 1, "vase": 2, "lamp": 3})
-        self.assertAlmostEqual(plan.draft_poses["bed"]["yaw_rad"], -math.pi / 2)
+        self.assertEqual(plan.draft_poses, {})  # sizes and poses are steps ② and ③'s, whatever the answer says
         near = [r for r in plan.relations if r["origin"] == "llm" and r["type"] == "near"]
         self.assertEqual(near[0]["max_distance_m"], 1.0)  # non-numeric distance -> default, no crash
         self.assertFalse([r for r in plan.relations if r["type"] == "faces" and r["origin"] == "llm"])
@@ -95,9 +91,9 @@ class LlmPlanTests(unittest.TestCase):
         group_near = [r for r in plan.relations if r["origin"] == "group"]
         self.assertEqual([r["object_id"] for r in group_near], [])  # ns already linked; lamp is on the nightstand
         dropped = plan.llm["dropped"]
-        self.assertEqual((dropped["unknown_object"], dropped["support_invalid"], dropped["size_invalid"],
-                          dropped["priority_invalid"], dropped["relation_invalid"], dropped["objects_missing"]),
-                         (1, 1, 1, 1, 1, 1))
+        self.assertEqual((dropped["unknown_object"], dropped["support_invalid"], dropped["priority_invalid"],
+                          dropped["relation_invalid"], dropped["objects_missing"]), (1, 1, 1, 1, 1))
+        self.assertNotIn("size_invalid", dropped)  # sizes in the answer are not read
         self.assertEqual(plan.llm["calls"][0]["usage"]["prompt_tokens"], 10)
 
     def test_cycle_rejected(self):
@@ -120,17 +116,6 @@ class LlmPlanTests(unittest.TestCase):
         with mock.patch("workflow.credentials.DEFAULT_ENV_FILE", ROOT / "no-such-settings.env"):
             with self.assertRaisesRegex(FatalAPIError, "no OpenAI settings file"):
                 make_plan(self.condition)
-
-    def test_priority_orders_the_solver(self):
-        condition = json.loads((ROOT / "examples" / "bedroom.json").read_text())
-        answer = {"objects": {"chair": {"priority": 1}, "desk": {"priority": 2}, "bed": {"priority": 3}}}
-        with fake_llm(answer):
-            result = run_workflow(condition, catalog_path=ROOT / "size_catalog.json", beam_width=8, candidate_limit=24)
-        self.assertEqual(result["status"], "ok")
-        # rules alone place the bed first; the plan's ranks lead, but the chair's hard near / faces on the desk
-        # still waits for the desk
-        self.assertEqual(result["diagnostics"]["search"][0]["order"][:3], ["desk", "chair", "bed"])
-        self.assertEqual(result["diagnostics"]["llm"]["calls"][0]["model"], "fake")
 
 
 if __name__ == "__main__":

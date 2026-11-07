@@ -13,9 +13,8 @@ from shapely.geometry import Polygon
 
 from workflow.critic import (Assessment, Critic, Violation, facing_error, unreachable, wall_back_error, walls)
 from workflow.geometry import Geometry
-from workflow.local_repair import FixedSizes
-from workflow.loop import Loop, LoopBudget
-from workflow.pipeline import run_draft_workflow
+from workflow.loop import FixedSizes
+from workflow.loop import Loop
 from workflow.planning import _required_parents, make_plan
 from workflow.solver import _pose
 
@@ -37,12 +36,13 @@ class CriticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.condition = _room()
-        cls.plan = make_plan(cls.condition, llm=False, semantic_only=True)
+        cls.plan = make_plan(cls.condition, llm=False)
         cls.g = _geometry(cls.condition, cls.plan)
         cls.critic = Critic.for_plan(cls.g, cls.plan, templates=[])
-        # a clean layout: bed against the top wall, the rest spread out; the lamp on the desk
+        # a clean layout: bed against the top wall (2 mm off it: geometry.BOUNDARY_INSET_M), the rest spread out;
+        # the lamp on the desk
         cls.placed = {
-            "bed": _pose("bed", [2.1, 1.6, .5], 2.5, 2.95, 0., -math.pi / 2, "floor"),
+            "bed": _pose("bed", [2.1, 1.6, .5], 2.5, 2.948, 0., -math.pi / 2, "floor"),
             "nightstand": _pose("nightstand", [.45, .45, .55], 1.15, 3.7, 0., -math.pi / 2, "floor"),
             "desk": _pose("desk", [.6, 1.2, .75], 4.6, 1.5, 0., math.pi, "floor"),
             "chair": _pose("chair", [.5, .5, .9], 3.95, 1.5, 0., 0., "floor"),
@@ -51,6 +51,44 @@ class CriticTests(unittest.TestCase):
 
     def test_clean_layout_has_no_hard_violation(self):
         self.assertEqual(self.critic.assess(self.placed).hard, [], self.critic.assess(self.placed).summary())
+
+    def test_sceneeval_contact_rules(self):
+        """Contact as SceneEval's OOB and Support check it (geometry.BOUNDARY_INSET_M, WALL_CONTACT_M,
+        SUPPORT_CENTRE_MARGIN)."""
+        g = Geometry(self.condition, {**self.plan.parents, "art": "wall"}, [], hard_openings=False)
+
+        def codes(box, placed=None):
+            return {issue.code for issue in g.check_box(box, placed or {})}
+        # flush with the top wall (y = 4) is out: a footprint keeps 1 mm inside the room
+        self.assertIn("boundary", codes(_pose("bed", [2.1, 1.6, .5], 2.5, 2.95, 0., -math.pi / 2, "floor")))
+        self.assertNotIn("boundary", codes(_pose("bed", [2.1, 1.6, .5], 2.5, 2.948, 0., -math.pi / 2, "floor")))
+        # a painting 3 cm off the wall does not hang on it; snapped, it does: back 2 mm off, facing the room
+        art = [.03, .8, .6]
+        self.assertIn("wall_support", codes(_pose("art", art, 2., 4 - .015 - .03, 1.2, -math.pi / 2, "wall")))
+        x, y, yaw = g.snap_to_wall(art, 2.1, 3.9, .3)
+        hung = _pose("art", art, x, y, 1.2, yaw, "wall")
+        self.assertEqual(codes(hung), set())
+        self.assertAlmostEqual(g.wall_gap(hung), .002, places=4)
+        self.assertAlmostEqual(x, 2.1)
+        self.assertAlmostEqual(yaw, -math.pi / 2)
+        # its back against the wall but facing it: not hung
+        self.assertIn("wall_support", codes(_pose("art", art, x, y, 1.2, yaw + math.pi, "wall")))
+        # a draft flush with the top wall, or 3 cm through it, is pushed just inside; one 20 cm through is left
+        bed = [2.1, 1.6, .5]
+        for y in (2.95, 2.98):
+            x2, y2 = g.push_inside(bed, 2.5, y, -math.pi / 2)
+            self.assertAlmostEqual(x2, 2.5)
+            self.assertAlmostEqual(y2, 2.95 - .0012, places=6)
+            self.assertNotIn("boundary", codes(_pose("bed", bed, x2, y2, 0., -math.pi / 2, "floor")))
+        self.assertEqual(g.push_inside(bed, 2.5, 3.15, -math.pi / 2), (2.5, 3.15))
+        # in a corner it moves off both walls
+        x2, y2 = g.push_inside([.5, .5, .9], .25, 3.75, 0.)
+        self.assertAlmostEqual(x2, .2512, places=6)
+        self.assertAlmostEqual(y2, 3.7488, places=6)
+        # on an object: the centre at least 1 cm inside the parent's top (the desk's spans y 0.9..2.1), overhang allowed
+        desk = {"desk": self.placed["desk"]}
+        self.assertNotIn("object_support", codes(_pose("lamp", [.25, .25, .45], 4.6, 2.08, .75, math.pi, "desk"), desk))
+        self.assertIn("object_support", codes(_pose("lamp", [.25, .25, .45], 4.6, 2.095, .75, math.pi, "desk"), desk))
 
     def test_smaller_overlap_counts_as_progress(self):
         deep = {**self.placed, "chair": _pose("chair", [.5, .5, .9], 4.2, 1.5, 0., 0., "floor")}
@@ -65,7 +103,6 @@ class CriticTests(unittest.TestCase):
         clean = self.critic.assess(self.placed)
         worse = Assessment(hard=[Violation("collision", ("a", "b"), .02)], soft=[])
         self.assertFalse(Critic.better(worse, clean)[0])
-        self.assertFalse(Critic.not_worse(worse, clean))
 
     def test_door_rule_follows_the_evaluator(self):
         # the door strip is x 0.15-1.05, y 0-0.8: a chair there blocks it, a rug does not
@@ -86,39 +123,16 @@ class CriticTests(unittest.TestCase):
         self.assertGreater(cost(far), cost(near))
 
     def test_fixed_sizes_do_not_shrink_in_the_loop(self):
-        sizes = FixedSizes({"bed": [2.1, 1.6, .5]}, SizeCatalog(CATALOG), allow_shrink=False)
+        sizes = FixedSizes({"bed": [2.1, 1.6, .5]})
         self.assertEqual(sizes.shrunk({"id": "bed", "category": "bed"}, 1), [])
 
 
 class LoopTests(unittest.TestCase):
-    def test_offline_workflow_with_critic(self):
-        condition = json.loads((ROOT / "examples" / "bedroom.json").read_text())
-        result = run_draft_workflow(condition, None, catalog_path=str(CATALOG), llm=False, placement="all",
-                                    loop_budget=LoopBudget(gpt_repairs=0, search_seconds=60))
-        critic = result["diagnostics"]["critic"]
-        self.assertGreater(critic["draft"]["hard_count"], 0)  # every object starts at one point
-        self.assertLess(critic["final"]["hard_count"], critic["draft"]["hard_count"])
-        self.assertEqual(result["status"] == "clean", critic["final"]["hard_count"] == 0)
-        sizes = result["diagnostics"]["sizes"]
-        for box in result["layout"]["objects"]:  # sizes fixed: nothing shrunk
-            self.assertEqual(box["target_size_local_m"], sizes[box["id"]])
-        self.assertTrue(all("accepted" in a for a in critic["loop"]["attempts"]))
+    """The loop's payload and answer parsing, which the review's fix request uses (semantic.py)."""
 
-    def test_group_workflow_places_by_group(self):
-        condition = json.loads((ROOT / "examples" / "bedroom.json").read_text())
-        result = run_draft_workflow(condition, None, catalog_path=str(CATALOG), llm=False, placement="group",
-                                    loop_budget=LoopBudget(gpt_repairs=0, search_seconds=30))
-        d = result["diagnostics"]
-        self.assertEqual(d["placement"], "group")
-        self.assertEqual(sorted(i for g in d["draft"]["groups"] for i in g), sorted(o["id"] for o in condition["objects"]))
-        self.assertEqual(result["status"] == "clean", d["critic"]["final"]["hard_count"] == 0)
-        self.assertIn("plan", result["timing_s"])
-        with self.assertRaises(ValueError):
-            run_draft_workflow(condition, None, catalog_path=str(CATALOG), llm=False, yaw_mode="fastfill")
-
-    def test_gpt_answer_respects_locked_supports_and_carries_children(self):
+    def test_review_answer_respects_locked_supports_and_carries_children(self):
         condition = _room()
-        plan = make_plan(condition, llm=False, semantic_only=True)
+        plan = make_plan(condition, llm=False)
         g = _geometry(condition, plan)
         sizes = {"bed": [2.1, 1.6, .5], "nightstand": [.45, .45, .55], "desk": [.6, 1.2, .75], "chair": [.5, .5, .9],
                  "lamp": [.25, .25, .45]}
@@ -126,7 +140,7 @@ class LoopTests(unittest.TestCase):
             CriticTests.setUpClass()
         placed = CriticTests.placed
         loop = Loop(g, plan, sizes, SizeCatalog(CATALOG), Critic.for_plan(g, plan, templates=[]),
-                    locked_parents=_required_parents(condition), budget=LoopBudget(gpt_repairs=1))
+                    locked_parents=_required_parents(condition))
         answer = {"objects": {"desk": {"x": 4.6, "y": 2.2, "yaw_deg": 180},
                               "lamp": {"x": 1.0, "y": 1.0, "yaw_deg": 0, "support": "floor"}}}
         new, parents = loop._apply(answer, {"desk", "lamp"}, placed)
@@ -136,23 +150,22 @@ class LoopTests(unittest.TestCase):
         answer = {"objects": {"desk": {"x": 4.6, "y": 2.2, "yaw_deg": 180}}}
         new, _ = loop._apply(answer, {"desk", "lamp"}, placed)  # no pose for the lamp: carried with the desk
         self.assertAlmostEqual(new["lamp"]["bottom_center_m"][1], 2.2)
-        partial = {k: v for k, v in placed.items() if k != "lamp"}  # step-by-step: the lamp is not placed yet
+        partial = {k: v for k, v in placed.items() if k != "lamp"}  # the lamp is not placed (left out)
         new, _ = loop._apply(answer, {"desk"}, partial)
         self.assertNotIn("lamp", new)
         self.assertAlmostEqual(new["desk"]["bottom_center_m"][1], 2.2)
 
-    def test_gpt_repair_request_carries_each_objects_description(self):
+    def test_review_request_carries_each_objects_description(self):
         condition = _room()
-        plan = make_plan(condition, llm=False, semantic_only=True)
+        plan = make_plan(condition, llm=False)
         g = _geometry(condition, plan)
         sizes = {"bed": [2.1, 1.6, .5], "nightstand": [.45, .45, .55], "desk": [.6, 1.2, .75], "chair": [.5, .5, .9],
                  "lamp": [.25, .25, .45]}
         if not hasattr(CriticTests, "placed"):
             CriticTests.setUpClass()
         loop = Loop(g, plan, sizes, SizeCatalog(CATALOG), Critic.for_plan(g, plan, templates=[]),
-                    locked_parents=_required_parents(condition), budget=LoopBudget(gpt_repairs=1))
-        target = Violation("overlap", ("desk", "chair"), .1)
-        payload = json.loads(loop._payload({"desk"}, target, Assessment(hard=[target]), CriticTests.placed))
+                    locked_parents=_required_parents(condition))
+        payload = json.loads(loop._payload({"desk"}, CriticTests.placed))
         self.assertEqual({o["id"]: o["description"] for o in payload["objects"]},
                          {o["id"]: o["description"] for o in condition["objects"]})
 
@@ -213,7 +226,7 @@ class OrientationReachTests(unittest.TestCase):
 
     def test_critic_flags_a_bed_turned_to_face_the_wall(self):
         condition = _room()
-        plan = make_plan(condition, llm=False, semantic_only=True)
+        plan = make_plan(condition, llm=False)
         critic = Critic.for_plan(_geometry(condition, plan), plan, templates=[],
                                  wall_rules={"against_wall": {"bed"}, "reach": set(), "reach_half_width_m": .2})
         if not hasattr(CriticTests, "placed"):

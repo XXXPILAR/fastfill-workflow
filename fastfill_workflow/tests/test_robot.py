@@ -130,7 +130,6 @@ class CriticTests(unittest.TestCase):
         self.assertFalse([v for v in critic.assess(placed).hard if v.code.startswith("robot_")])
         critic.robot = RobotChecker.for_critic(Robot(), critic)
         self.assertIn("robot_door", {v.code for v in critic.assess(placed).hard})
-        self.assertIn("robot_door", {v.code for v in critic.with_geometry(critic.g).assess(placed).hard})
 
 
 class ZoneTests(unittest.TestCase):
@@ -247,16 +246,14 @@ class DraftTests(unittest.TestCase):
 
 class FallbackTests(unittest.TestCase):
     def test_no_object_is_ever_shrunk(self):
-        from workflow.catalog import SizeCatalog
-        from workflow.local_repair import RESIZE_LEVELS, FixedSizes
+        from workflow.loop import FixedSizes
         request = {"id": "bed", "category": "king size bed"}
-        sizes = {"bed": [2.2, 2.0, 1.0]}
-        fixed = FixedSizes(sizes, SizeCatalog(None), levels=RESIZE_LEVELS, floor=False)
-        self.assertEqual([fixed.shrunk(request, level) for level in RESIZE_LEVELS], [[]] * len(RESIZE_LEVELS))
+        fixed = FixedSizes({"bed": [2.2, 2.0, 1.0]})
+        self.assertFalse(fixed.allow_shrink)
+        self.assertEqual([fixed.shrunk(request, level) for level in (1, 2, 3, 4)], [[]] * 4)
 
     def test_with_a_robot_an_object_on_a_large_table_gets_spots_along_its_edges(self):
-        from workflow.catalog import SizeCatalog
-        from workflow.local_repair import FixedSizes
+        from workflow.loop import FixedSizes
         from workflow.solver import CandidateGenerator
         condition = _condition([("t", "dining table"), ("cup", "cup")])
         plan = Plan({"t": "floor", "cup": "t"})
@@ -264,7 +261,7 @@ class FallbackTests(unittest.TestCase):
         geometry = Geometry(condition, plan.parents, [])
         table = _pose("t", sizes["t"], 2, 1.5, 0, 0, "floor")
         spots = lambda: {tuple(c.box["bottom_center_m"][:2]) for c in CandidateGenerator(
-            geometry, FixedSizes(sizes, SizeCatalog(None)), plan, "local", 1)._on_parent("cup", {"t": table})}
+            geometry, FixedSizes(sizes), plan, "local", 1)._on_parent("cup", {"t": table})}
         without = spots()
         geometry.robot_zones = RobotZones(Robot(), geometry)
         edges = spots() - without

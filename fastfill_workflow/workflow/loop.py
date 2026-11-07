@@ -1,4 +1,4 @@
-"""Step ⑤ of critic_flowchart_v2: the budgeted check-and-repair loop (program proposals first, GPT on demand).
+"""The program check-and-repair loop (steps ④-④c of ``simple``): every proposal is the program's, at fixed sizes.
 
 Each attempt takes the worst issue not tried yet (hard violations by magnitude while any are left, then soft costs of
 at least ``min_soft_cost``) and builds a repair scope (flowchart §2 B):
@@ -12,10 +12,6 @@ Proposals (flowchart §2 C):
   program  the solver's local beam search over the scope at fixed sizes (no shrinking), near the current poses; a
            template issue (A far from / not facing B) enters the search as a temporary soft relation so the search
            proposes positions beside B. The critic picks among the complete states of the last beam.
-  GPT      when every program level failed and ``gpt_repairs`` allows: one request with the room, every object's pose,
-           the scope, the evidence (codes, objects, magnitudes) and earlier failed attempts; it answers new poses for
-           scope objects, and may re-pick the support of an object whose support it inferred (the input's supports and
-           hard ``on`` constraints stay locked). Children move with their parent.
   relocate (``relocate=True``) when the local proposals fail on a robot check (robot_reach, robot_openable,
            robot_door): each blocker the check names (up to ``RELOCATE_MOVERS``), then the furniture the robot cannot
            reach, is searched for over the whole room with what stands on it, its distance from where it stands
@@ -28,9 +24,8 @@ critique rounds and solver iteration limits, LayoutVLM's fixed iterations): ever
 (``beam_width``, ``candidate_limit``), and the attempts are bounded by ``max_attempts`` (default: 24 plus three per
 issue found at the start). ``stale_limit`` (default off) stops after that many attempts in a row without an accepted
 change. There is no time limit by default: how long a room takes never decides how well it is repaired.
-``search_seconds``, when given (tests, the recorded order experiments), stops the loop once the program search has
-used that long; the loop then ends with termination "time limit", so a result cut short by time is never silent. Each GPT request counts against ``gpt_repairs`` whether its
-candidate is accepted or not.
+``search_seconds``, when given (``repair_seconds``: 180 s per pass in the paper's runs), stops the loop once the program search has
+used that long; the loop then ends with termination "time limit", so a result cut short by time is never silent.
 """
 
 from __future__ import annotations
@@ -46,9 +41,34 @@ from .catalog import SizeCatalog
 from .critic import WEIGHTS, Assessment, Critic, Violation  # WEIGHTS' keys are the soft codes
 from .drafting import WALL_BOTTOM_M
 from .geometry import Geometry
-from .local_repair import DRAFT_WEIGHT, FixedSizes, _with_children
 from .planning import Plan, _number
 from .solver import _pose, _wrap, beam_search
+
+DRAFT_WEIGHT = 2.0  # per metre away from the draft; one violated soft relation costs 3 in the beam rank
+
+
+class FixedSizes:
+    """Catalog interface for the solver with one size per object: no step resizes an object, so ``shrunk`` offers
+    none (``allow_shrink`` False: the solver's local mode tries no shrink level)."""
+    allow_shrink = False
+
+    def __init__(self, sizes: dict[str, list[float]]):
+        self.sizes = sizes
+
+    def candidates(self, request: dict, llm_hint=None) -> list[tuple[list[float], float, str]]:
+        return [(self.sizes[request["id"]], 0., "fixed")]
+
+    def shrunk(self, request: dict, level: int) -> list[tuple[list[float], float, str]]:
+        return []
+
+
+def _with_children(plan: Plan, ids: set[str]) -> set[str]:
+    result, changed = set(ids), True
+    while changed:
+        before = len(result)
+        result |= {ident for ident, parent in plan.parents.items() if parent in result}
+        changed = len(result) != before
+    return result
 
 CANDIDATES_ASSESSED = 8  # complete beam states the critic scores per proposal
 # the beam's cost per metre (and quarter turn) away from the current pose: hard issues keep step ④'s weight (stay
@@ -64,30 +84,10 @@ RELOCATABLE = {"robot_reach", "robot_openable", "robot_door"}
 
 @dataclass
 class LoopBudget:
-    gpt_repairs: int = 2                 # K_repair: GPT repair requests, accepted or not
     max_attempts: int | None = None      # issues taken up; None: 24 + 3 per issue found at the start
     stale_limit: int | None = None       # attempts in a row without an accepted change; None: no early stop
     search_seconds: float | None = None  # program search time limit; None (default): none, the attempts decide
     min_soft_cost: float = .05           # soft violations below this weighted cost are left alone
-
-
-REPAIR_INSTRUCTIONS = """You repair part of a furniture layout. The user message is JSON: the room (floor polygon in \
-metres, world x/y, z up; openings; fixed objects that cannot move), every object with its category, the user's \
-description of it, its fixed size (width = left-right as seen from its front, depth = front-back, height), current \
-pose and support, the objects you may move ("movable"), the problems a program check found (with the objects involved \
-and how large they are), the input's constraints, and earlier repair attempts that were rejected. A repair must not \
-go against an object's description.
-
-Answer with one JSON object only, no prose:
-{"objects": {"<id>": {"x": x, "y": y, "yaw_deg": a}}}
-Only movable objects may appear; leave out those that should stay. x, y: bottom-centre in world metres; yaw_deg: the \
-direction the object's front faces, counter-clockwise degrees from world +x. An object whose "support_changeable" is \
-true may also get "support": "floor", "wall" or another object's id when its current support cannot hold it; \
-objects on a moved parent move with it unless you give them a pose. Do not change sizes.
-
-Fix the listed problems without creating new ones: stay inside the floor polygon, off other objects and fixed \
-objects, keep door strips clear, keep the input's constraints. Prefer small moves; keep related furniture together \
-(seats with their table, nightstands beside the bed, etc.)."""
 
 
 def _describe(v: Violation) -> str:
@@ -105,7 +105,7 @@ HARD_M = {"collision", "boundary", "vertical_bounds", "floor_support", "wall_sup
 
 class Loop:
     def __init__(self, geometry: Geometry, plan: Plan, sizes: dict[str, list[float]], catalog: SizeCatalog,
-                 critic: Critic, *, locked_parents: dict[str, str], ask=None, budget: LoopBudget | None = None,
+                 critic: Critic, *, locked_parents: dict[str, str], budget: LoopBudget | None = None,
                  beam_width: int = 24, candidate_limit: int = 48, draft_weight: float = DRAFT_WEIGHT,
                  relocate: bool = False, rounds: int = 1, first: frozenset = frozenset()):
         """Every object keeps its size: the search moves and turns objects, never resizes one. ``first``: violations
@@ -116,15 +116,12 @@ class Loop:
         violations are left (every issue is taken up once per pass)."""
         self.g, self.plan, self.sizes, self.catalog, self.critic = geometry, plan, sizes, catalog, critic
         self.locked = locked_parents
-        self.ask = ask
         self.budget = budget or LoopBudget()
         self.beam_width, self.candidate_limit, self.draft_weight = beam_width, candidate_limit, draft_weight
-        self.fixed_sizes = FixedSizes(sizes, catalog, allow_shrink=False)
+        self.fixed_sizes = FixedSizes(sizes)
         self.relocate, self.rounds = relocate, max(1, rounds)
         self.first = frozenset(first)
         self.search_s = 0.
-        self.gpt_calls: list[dict] = []
-        self.failed: list[str] = []
 
     # ---------------------------------------------------------------- scope
     def scope(self, ids: tuple[str, ...], level: int, current: Assessment) -> set[str]:
@@ -189,8 +186,8 @@ class Loop:
             candidates = [{**placed, **trace["partial"]}]
         return candidates
 
-    # ---------------------------------------------------------------- GPT proposal
-    def _payload(self, scope: set[str], target: Violation, current: Assessment, placed: dict[str, dict]) -> str:
+    # ---------------------------------------------------------------- the review's fix request (semantic.py)
+    def _payload(self, scope: set[str], placed: dict[str, dict]) -> str:
         objects = []
         for obj in self.g.condition["objects"]:
             ident, box = obj["id"], placed[obj["id"]]
@@ -202,13 +199,10 @@ class Loop:
                             "z": round(box["bottom_center_m"][2], 3),
                             "yaw_deg": round(math.degrees(box["yaw_rad"]), 1), "movable": ident in scope,
                             "support_changeable": ident in scope and ident not in self.locked})
-        involved = [v for v in current.hard + current.soft if set(v.ids) & scope]
-        involved.sort(key=lambda v: (v not in current.hard, -v.magnitude))
         room = {k: v for k, v in self.g.room.items() if k in ("floor_polygon_xy_m", "floor_z_m", "height_m", "openings",
                                                                "fixed_objects")}
-        return json.dumps({"room": room, "objects": objects, "constraints": self.g.condition["constraints"],
-                           "problems": [_describe(target)] + [_describe(v) for v in involved if v != target][:15],
-                           "rejected_attempts": self.failed[-4:]}, ensure_ascii=False)
+        return json.dumps({"room": room, "objects": objects, "constraints": self.g.condition["constraints"]},
+                          ensure_ascii=False)
 
     def _apply(self, answer: dict, scope: set[str], placed: dict[str, dict]) -> tuple[dict[str, dict], dict[str, str]]:
         """New boxes from the answer: poses for scope objects, supports re-picked where allowed, children carried."""
@@ -270,8 +264,12 @@ class Loop:
                         "y": anchor_new["bottom_center_m"][1] + s * dx + c * dy,
                         "yaw_rad": _wrap(old["yaw_rad"] + turn), "z": None}
             if parent == "floor":
+                pose = dict(pose)
+                pose["x"], pose["y"] = self.g.push_inside(size, pose["x"], pose["y"], pose["yaw_rad"])
                 z = self.g.floor
             elif parent == "wall":
+                pose = dict(pose)
+                pose["x"], pose["y"], pose["yaw_rad"] = self.g.snap_to_wall(size, pose["x"], pose["y"], pose["yaw_rad"])
                 top = self.g.ceiling - size[2] - .03
                 given = pose.get("z")
                 z = given if given is not None and self.g.floor <= given <= top else \
@@ -284,26 +282,6 @@ class Loop:
                                            parent, parent_box)
             new[ident] = _pose(ident, size, pose["x"], pose["y"], z, pose["yaw_rad"], parent)
         return new, parents
-
-    def gpt(self, scope: set[str], target: Violation, current: Assessment,
-            placed: dict[str, dict]) -> tuple[dict[str, dict] | None, dict[str, str] | None, str]:
-        try:
-            text, call = self.ask(REPAIR_INSTRUCTIONS, self._payload(scope, target, current, placed))
-        except (RuntimeError, ValueError) as exc:
-            self.gpt_calls.append({"error": f"{type(exc).__name__}: {exc}"[:300]})
-            return None, None, "request failed"
-        self.gpt_calls.append(call)
-        first, last = text.find("{"), text.rfind("}")
-        try:
-            answer = json.loads(text[first:last + 1]) if 0 <= first < last else None
-        except json.JSONDecodeError:
-            answer = None
-        if not isinstance(answer, dict):
-            return None, None, "answer is not a JSON object"
-        new, parents = self._apply(answer, scope, placed)
-        if new == placed and parents == self.plan.parents:
-            return None, None, "answer moved nothing"
-        return new, parents, ""
 
     def movers(self, target: Violation) -> list[str]:
         """Floor objects to re-place for a robot issue: its blockers (up to RELOCATE_MOVERS), then its own object."""
@@ -390,39 +368,18 @@ class Loop:
                     if ok:
                         placed, current, accepted = candidate, after, True
                         break
-            if not accepted and self.ask is not None and len(self.gpt_calls) < self.budget.gpt_repairs:
-                scope = self.scope(target.ids, 1, current)
-                t0 = time.perf_counter()
-                candidate, parents, problem = self.gpt(scope, target, current, placed)
-                critic = self.critic
-                if candidate is not None and parents != self.plan.parents:
-                    critic = self.critic.with_geometry(_regeometry(self.g, parents))
-                after = critic.assess(candidate) if candidate is not None else None
-                ok, reason = critic.better(after, current) if after else (False, problem)
-                info["attempts"].append({"target": target.as_dict(), "level": 1, "scope": len(scope), "source": "gpt",
-                                         "accepted": ok, "reason": reason, "before": current.key(),
-                                         "after": after.key() if after else None,
-                                         "seconds": round(time.perf_counter() - t0, 3)})
-                if ok:
-                    if parents != self.plan.parents:  # the geometry and critic read plan.parents (same dict)
-                        changed = {k: (self.plan.parents[k], v) for k, v in parents.items() if self.plan.parents[k] != v}
-                        self.plan.parents.update(parents)
-                        info.setdefault("support_changes", {}).update({k: list(v) for k, v in changed.items()})
-                    placed, current, accepted = candidate, after, True
-                else:
-                    self.failed.append(f"moving {sorted(scope)} for {_describe(target)} was rejected: {reason}")
             pass_accepted = pass_accepted or accepted
             stale = 0 if accepted else stale + 1
             if self.budget.stale_limit is not None and stale >= self.budget.stale_limit:
                 info["termination"] = "no improvement"
                 break
-        info.update(final=current.summary(), passes=passes, gpt_calls=self.gpt_calls, search_seconds=round(self.search_s, 3),
+        info.update(final=current.summary(), passes=passes, search_seconds=round(self.search_s, 3),
                     seconds=round(time.perf_counter() - start, 3))
         return placed, info
 
 
 class FocusedLoop(Loop):
-    """The loop restricted to ``movable`` objects (``orders``' step-by-step modes): only issues involving them are
+    """The loop restricted to ``movable`` objects (the review's repair of a fix): only issues involving them are
     taken up, only they move; everything else is frozen."""
 
     def __init__(self, *args, movable: set[str], **kwargs):
@@ -440,23 +397,8 @@ class FocusedLoop(Loop):
         return super().scope(ids, level, current) & self.movable & set(self.g.requests)
 
 
-def _regeometry(geometry: Geometry, parents: dict[str, str]) -> Geometry:
-    """The same geometry with another support map (a GPT candidate that re-picks supports is checked with it)."""
-    other = copy.copy(geometry)
-    other.parents = parents
-    return other
-
-
-def critic_loop(geometry: Geometry, plan: Plan, sizes: dict[str, list[float]], placed: dict[str, dict],
-                catalog: SizeCatalog, critic: Critic, *, locked_parents: dict[str, str], ask=None,
-                budget: LoopBudget | None = None, beam_width: int = 24, candidate_limit: int = 48,
-                draft_weight: float = DRAFT_WEIGHT) -> tuple[dict[str, dict], dict]:
-    return Loop(geometry, plan, sizes, catalog, critic, locked_parents=locked_parents, ask=ask, budget=budget,
-                beam_width=beam_width, candidate_limit=candidate_limit, draft_weight=draft_weight).run(placed)
-
-
 def make_ask(model: str | None, base_url: str | None, api_key: str | None):
-    """The GPT repair request through the workflow's official-API client."""
+    """An LLM request function (the review's, ``semantic.SemanticPass``) through the workflow's client."""
     def ask(instructions: str, prompt: str):
         return llm_client.ask(instructions, prompt, model=model, base_url=base_url, api_key=api_key)
     return ask

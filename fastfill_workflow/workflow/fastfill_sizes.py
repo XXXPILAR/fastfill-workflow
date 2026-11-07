@@ -6,8 +6,9 @@ it); positions are discarded. The size head is a linear
 layer, so the size does not depend on the decode: argmax, spread and remask1L give identical sizes (checked on all
 4541 test300 objects of the base arm), and this is the size the earlier test300 runs used.
 
-    # FastFill 1.7B full fine-tuning on v4detail, the model of the 2026-11 experiments (tokenizer beside model-step-4500)
-    sizer = FastFillSizer("runs/main4-cell05-v4detail-e5-1.7b-all-full/model-step-4500", device="cuda")
+    # FastFill 1.7B full fine-tuning on v4detail (every room), the model of the 2026-11 experiments: the run folder
+    # holds tokenizer/ beside model-step-4500/ (backbone/ with the full weights, geometry_model.pt, model_config.json)
+    sizer = FastFillSizer("main4-cell05-v4detail-e5-1.7b-all-full/model-step-4500", device="cuda")
     sizes = sizer(condition)          # {object id: [depth, width, height]}
     sizes, yaws = sizer.predict(condition)   # and {object id: yaw in rad}, for the hybrid yaw mode
 
@@ -39,10 +40,12 @@ class FastFillSizer:
     def predict(self, condition: dict) -> tuple[dict[str, list[float]], dict[str, float]]:
         """(sizes, yaws): one size [depth, width, height] and one yaw (rad) per object id. The yaw belongs with
         the size (the same head pass, the same depth axis), which the hybrid yaw mode relies on."""
+        import torch
         from fastfill.v2.evaluate import predict_layout
 
-        layout = predict_layout(self.model, self.tokenizer, condition, max_length=self.max_length,
-                                device=self.device, grid_decode="spread")
+        with torch.no_grad():  # as the experiments' sizes were predicted
+            layout = predict_layout(self.model, self.tokenizer, condition, max_length=self.max_length,
+                                    device=self.device, grid_decode="spread")
         return ({box["id"]: [float(v) for v in box["target_size_local_m"]] for box in layout["objects"]},
                 {box["id"]: float(box["yaw_rad"]) for box in layout["objects"]})
 

@@ -1,7 +1,7 @@
 """One semantic planning pass; all hard constraints remain owned by the input.
 
 The plan holds the support graph (``parents``), soft relation preferences, functional groups (an anchor and its
-members), a placement priority, size hints and pose drafts. By default one LLM call proposes all of them
+members) and a placement priority; sizes are step ②'s and poses step ③'s. By default one LLM call proposes them
 (``make_plan(..., llm=True)``); the input's support_parent values and hard ``on`` constraints stay locked, every LLM
 field is checked, and any LLM failure falls back to the rule plan with the reason recorded in ``Plan.llm``.
 ``llm=False`` gives the rule plan alone (an ablation, and the offline tests).
@@ -28,8 +28,7 @@ class Plan:
     relations: list[dict] = field(default_factory=list)
     groups: list[dict] = field(default_factory=list)          # {"anchor": id, "members": [ids]}
     priority: dict[str, int] = field(default_factory=dict)     # id -> rank, 1 = place first
-    size_hints: dict[str, list[float]] = field(default_factory=dict)   # local [x (depth), y (width), z]
-    draft_poses: dict[str, dict] = field(default_factory=dict)
+    draft_poses: dict[str, dict] = field(default_factory=dict)  # the poses the solver's local search starts from
     source: str = "rules"
     llm: dict = field(default_factory=dict)                    # calls, dropped fields, error
 
@@ -156,32 +155,6 @@ def _heuristic_plan(condition: dict) -> Plan:
     return Plan(parents, relations, [{"anchor": a, "members": m} for a, m in groups.items()])
 
 
-INSTRUCTIONS = """You plan an indoor furniture layout. The user message is the room condition as JSON: floor polygon \
-(metres, world x/y, z up), openings, fixed objects (obstacles that cannot move), the objects to place (id, category, \
-description, sometimes support_parent) and constraints. No object to place has a size or pose yet.
-
-Answer with one JSON object only, no prose:
-{"objects": {"<id>": {"support": "floor" | "wall" | "<id of another object or fixed object it rests on>",
-                      "size_m": {"width": w, "depth": d, "height": h},
-                      "priority": n,
-                      "draft": {"x": x, "y": y, "yaw_deg": a}}},
- "groups": [{"anchor": "<id>", "members": ["<id>", ...]}],
- "relations": [{"type": "near", "object_id": "<id>", "target_id": "<id>", "max_distance_m": m},
-               {"type": "faces", "object_id": "<id>", "target_id": "<id>"},
-               {"type": "against_wall", "object_id": "<id>"}]}
-
-Rules:
-- Include every object id exactly once under "objects"; do not add or remove objects.
-- size_m: the object's real size in metres. width = left-right as seen from its front, depth = front-back, height = vertical.
-- priority: placement order, 1 = place first (large anchor furniture first, items that depend on others later).
-- draft (optional): a suggested bottom-centre position in world metres and the direction its front faces, \
-counter-clockwise degrees from the world +x axis.
-- groups: functional groups (e.g. a table and its chairs, a bed and its nightstands); the anchor is the object the \
-others are arranged around.
-- relations are soft preferences you add; the input constraints already hold and must not be restated or changed.
-- Keep a given support_parent and the input's "on" constraints as they are."""
-
-
 SEMANTIC_INSTRUCTIONS = """You plan the structure of an indoor furniture layout; positions and sizes are decided later. \
 The user message is the room condition as JSON: floor polygon (metres, world x/y, z up), openings, fixed objects \
 (obstacles that cannot move), the objects to place (id, category, description, sometimes support_parent) and \
@@ -226,9 +199,6 @@ def _apply_llm(plan: Plan, condition: dict, proposal: dict) -> dict:
     def drop(reason: str) -> None:
         dropped[reason] = dropped.get(reason, 0) + 1
 
-    xs = [p[0] for p in condition["room"]["floor_polygon_xy_m"]]
-    ys = [p[1] for p in condition["room"]["floor_polygon_xy_m"]]
-    extent = max(max(xs) - min(xs), max(ys) - min(ys))
     entries = proposal.get("objects") if isinstance(proposal.get("objects"), dict) else {}
     dropped["objects_missing"] = len(id_set - set(entries))
     ranked = []
@@ -242,28 +212,11 @@ def _apply_llm(plan: Plan, condition: dict, proposal: dict) -> dict:
                 plan.parents[ident] = parent
             else:
                 drop("support_invalid")
-        size = entry.get("size_m")
-        if isinstance(size, dict):
-            w, d, h = (_number(size.get(k), .01, max(extent, 3.)) for k in ("width", "depth", "height"))
-            if None in (w, d, h):
-                drop("size_invalid")
-            else:
-                plan.size_hints[ident] = [d, w, h]  # local x is the front (depth) axis
-        elif size is not None:
-            drop("size_invalid")
         rank = _number(entry.get("priority"), 1, 10 ** 6)
         if rank is not None:
             ranked.append((rank, ids.index(ident), ident))
         elif entry.get("priority") is not None:
             drop("priority_invalid")
-        draft = entry.get("draft")
-        if isinstance(draft, dict):
-            x, y = _number(draft.get("x"), -1e4, 1e4), _number(draft.get("y"), -1e4, 1e4)
-            yaw = _number(draft.get("yaw_deg"), -1e4, 1e4)
-            if None in (x, y, yaw):
-                drop("draft_invalid")
-            else:
-                plan.draft_poses[ident] = {"x": x, "y": y, "yaw_rad": math.remainder(math.radians(yaw), 2 * math.pi)}
     plan.priority = {ident: k + 1 for k, (_, _, ident) in enumerate(sorted(ranked))}
 
     known = id_set | fixed_ids
@@ -305,12 +258,12 @@ def _group_relations(plan: Plan) -> None:
 
 
 def make_plan(condition: dict, *, llm: bool = True, model: str | None = None,
-              base_url: str | None = None, api_key: str | None = None, semantic_only: bool = False) -> Plan:
-    """``semantic_only``: step ① of the draft workflow (support, priority, groups, relations; no sizes or poses)."""
+              base_url: str | None = None, api_key: str | None = None) -> Plan:
+    """Step ①: support, priority, groups and relations (no sizes or poses)."""
     plan = _heuristic_plan(condition)
     if llm:
         try:
-            text, call = llm_client.ask(SEMANTIC_INSTRUCTIONS if semantic_only else INSTRUCTIONS,
+            text, call = llm_client.ask(SEMANTIC_INSTRUCTIONS,
                                         json.dumps(condition, ensure_ascii=False),
                                         model=model, base_url=base_url, api_key=api_key)
             plan.llm["calls"] = [call]
@@ -318,8 +271,6 @@ def make_plan(condition: dict, *, llm: bool = True, model: str | None = None,
             if first < 0 or last <= first:
                 raise ValueError("LLM response does not contain a JSON object")
             plan.llm["dropped"] = _apply_llm(plan, condition, json.loads(text[first:last + 1]))
-            if semantic_only:  # sizes are step ②'s and poses step ③'s, even if the answer volunteers them
-                plan.size_hints, plan.draft_poses = {}, {}
             plan.source = "llm+rules"
         except (RuntimeError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             if isinstance(exc, ValueError) and "requires --model" in str(exc):
