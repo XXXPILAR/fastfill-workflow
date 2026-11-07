@@ -36,7 +36,7 @@
 | `fastfill_workflow/workflow/cli.py` | 命令行 `python -m workflow`：`sizes` 是**第 ① 步**（FastFill 算尺寸），`run` 是**第 ② 步**（摆放），`run --checkpoint` 两步一起跑 |
 | `fastfill_workflow/examples/task_rooms.jsonl` | 两个示例房间：一个最小示例，一个真实房间（带任务） |
 | `fastfill_workflow/*.json` | 尺寸表和规则表，运行时会读取 |
-| `fastfill_workflow/tests/` | 112 个单元测试（不调用 GPT；`test_run_cli.py` 用一个很小的 FastFill 模型把整条通路跑一遍） |
+| `fastfill_workflow/tests/` | 113 个单元测试（不调用 GPT；`test_run_cli.py` 用一个很小的 FastFill 模型把整条通路跑一遍） |
 | `docs/program_repair_rules.md` | 程序修复的每一条规则、阈值和代码位置 |
 | `fastfill/` | 流程用到的 FastFill 代码：数据格式、合法性检查、模型加载和推理 |
 
@@ -45,7 +45,7 @@
 ```bash
 git clone https://github.com/XXXPILAR/fastfill-workflow.git && cd fastfill-workflow
 python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cd fastfill_workflow && ../.venv/bin/python -m pytest -q tests      # 应该是 112 passed
+cd fastfill_workflow && ../.venv/bin/python -m pytest -q tests      # 应该是 113 passed
 ```
 
 下面的命令都在 `fastfill_workflow/` 目录下运行。

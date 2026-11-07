@@ -72,6 +72,17 @@ class SimpleTests(unittest.TestCase):
         self.assertEqual(d["robot"]["ok"], not robot_hard)
         self.assertIsNone(run_simple(_request(), None, catalog_path=str(CATALOG), llm=False)["diagnostics"]["robot"])
 
+    def test_the_earlier_interface_still_works(self):
+        """infinite-task-world's bridge passes placement="simple", critic=True and imports orders.critic_geometry."""
+        from workflow import critic, orders
+        self.assertIs(orders.critic_geometry, critic.critic_geometry)
+        result = run_draft_workflow(_request(), None, catalog_path=str(CATALOG), llm=False, placement="simple",
+                                    critic=True)
+        self.assertEqual(result["diagnostics"]["placement"], "simple")
+        for kwargs in ({"placement": "staged"}, {"critic": False}):
+            with self.assertRaises(ValueError):
+                run_draft_workflow(_request(), None, catalog_path=str(CATALOG), llm=False, **kwargs)
+
     def test_pipeline_runs_the_simple_workflow(self):
         result = run_draft_workflow(_request(), None, catalog_path=str(CATALOG), llm=False)
         self.assertEqual(result["diagnostics"]["placement"], "simple")

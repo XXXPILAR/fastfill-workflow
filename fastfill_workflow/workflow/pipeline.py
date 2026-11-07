@@ -18,7 +18,8 @@ def run_draft_workflow(condition: dict, sizes: dict[str, list[float]] | None, *,
                        semantic_ask=None, robot=None, drafts: int = 1, robot_margin: float = 0.0,
                        hard_zones: bool = False, relocate: bool = False, repair_rounds: int = 1,
                        repair_seconds: float | None = None, draft_sizes: bool = False,
-                       required: set[str] | None = None, articulation: set[str] | None = None) -> dict:
+                       required: set[str] | None = None, articulation: set[str] | None = None,
+                       placement: str = "simple", critic: bool = True) -> dict:
     """One room: ① the LLM's semantic plan, ② one size per object (``sizes``, or when it is None
     ``sizer.predict(condition)``, a ``fastfill_sizes.FastFillSizer`` run on the request as given; an id without one
     gets the train catalog's, and a room the sizer cannot take is recorded in ``size_error``), then steps ③-⑦ of
@@ -36,7 +37,13 @@ def run_draft_workflow(condition: dict, sizes: dict[str, list[float]] | None, *,
     ``required`` / ``articulation`` (the task mode): the task's required objects are never removed or shrunk and must
     be legal and reachable, expansion objects give way (``simple.run_simple``). The task mode always delivers a room:
     when the plan call fails the rules' plan is used, and when the workflow fails the required objects alone are laid
-    out by the program (``simple.required_only``)."""
+    out by the program (``simple.required_only``).
+
+    ``placement`` / ``critic``: kept for callers of the earlier interface (infinite-task-world's bridge passes
+    ``placement="simple", critic=True``); the simple placement with the critic is the only workflow left."""
+    if placement != "simple" or critic is not True:
+        raise ValueError("only placement='simple' with the critic remains (the staged, group and critic-free "
+                         "workflows are gone)")
     if draft_sizes and (sizes is not None or sizer is not None):
         raise ValueError("draft_sizes needs no sizes or sizer")
     if yaw_mode not in ("prompt", "llm"):
